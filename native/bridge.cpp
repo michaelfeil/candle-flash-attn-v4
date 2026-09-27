@@ -4,6 +4,9 @@
 #include <tvm/ffi/extra/c_env_api.h>
 #include <cmath>
 #include <string>
+#include <atomic>
+#include <exception>
+#include <mutex>
 extern "C" {
 int __tvm_ffi_fa4_bert_fp16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
 int __tvm_ffi_fa4_modern_local_fp16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
@@ -20,6 +23,36 @@ struct StreamScope {
  StreamScope(int d,void* stream):device(d),previous(nullptr){if(TVMFFIEnvSetStream(kDLCUDA,d,stream,&previous))throw std::runtime_error("Unable to set TVM stream");}
  ~StreamScope(){TVMFFIEnvSetStream(kDLCUDA,device,previous,nullptr);}
 };
+// CuTe DSL 4.7.1 can retain its global loader spinlock when a second
+// thread observes an export initialized after acquiring that lock. Serialize
+// only the first successful call to each export; warm calls stay concurrent.
+namespace {
+std::mutex export_init_mutex;
+std::atomic<bool> export_initialized[8]{};
+std::exception_ptr export_init_failure;
+
+template <typename F>
+void invoke_export(unsigned slot, F&& invoke) {
+  if (!export_initialized[slot].load(std::memory_order_acquire)) {
+    std::unique_lock<std::mutex> lock(export_init_mutex);
+    if (export_init_failure) std::rethrow_exception(export_init_failure);
+    if (!export_initialized[slot].load(std::memory_order_relaxed)) {
+      try {
+        invoke();
+        export_initialized[slot].store(true, std::memory_order_release);
+      } catch (...) {
+        // The runtime's failed-init path may also retain the loader lock.
+        // Fail later cold calls instead of re-entering a poisoned loader.
+        export_init_failure = std::current_exception();
+        throw;
+      }
+      return;
+    }
+  }
+  invoke();
+}
+}  // namespace
+
 // Export families: 0 global d64 MHA, 1 windowed d64 MHA, 2 causal d128 GQA4.
 // Pointers remain owned by the caller; no device allocation or synchronization here.
 extern "C" int candle_fa4_forward_v4(int mode,int dtype,int device,void* stream,void* q,void* k,void* v,void* o,void* offsets,void* offsets_k,int64_t total,int64_t total_k,int64_t batch,int64_t h,int64_t hk,double scale,int left,int right,const int64_t* strides){
@@ -45,7 +78,9 @@ extern "C" int candle_fa4_forward_v4(int mode,int dtype,int device,void* stream,
   tvm::ffi::Array<tvm::ffi::Any> aux{nullptr,nullptr};tvm::ffi::Any lb=mode==1?tvm::ffi::Any(int64_t(left)):tvm::ffi::Any(nullptr);
   tvm::ffi::Any rb=mode==1?tvm::ffi::Any(int64_t(right)):tvm::ffi::Any(nullptr);
   StreamScope scope(device,stream);
+  invoke_export(dtype * 3 + mode, [&] {
   fn(&qt,&kt,&vt,&ot,nullptr,scale,&ct,&ckt,nullptr,nullptr,nullptr,lb,rb,nullptr,nullptr,aux,nullptr,nullptr);
+  });
   last_error.clear();return 0;
  }catch(const std::exception& e){last_error=e.what();return -1;}
 }
@@ -77,7 +112,9 @@ extern "C" int candle_fa4_deberta_v1(int dtype,int device,void* stream,
   tvm::ffi::Array<tvm::ffi::Any> tensors{tvm::ffi::Tensor::FromDLPack(&am),tvm::ffi::Tensor::FromDLPack(&bm),tvm::ffi::Tensor::FromDLPack(&lm)};
   tvm::ffi::Array<tvm::ffi::Any> aux{tensors,nullptr};
   StreamScope scope(device,stream);
+  invoke_export(6 + dtype, [&] {
   fns[dtype](&qt,&kt,&vt,&ot,nullptr,1.0,&ct,&ct,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,aux,nullptr,nullptr);
+  });
   last_error.clear();return 0;
  } catch(const std::exception& e){last_error=e.what();return -1;}
 }
