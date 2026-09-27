@@ -160,6 +160,19 @@ pub fn flash_attn_varlen_cross(
     if !scale.is_finite() {
         candle::bail!("attention scale must be finite")
     }
+    // The native online softmax scales already-masked (-inf) logits, so its
+    // scale must be positive. Preserve nonpositive-scale semantics through Q.
+    let adjusted_q;
+    let (q, scale) = if scale <= 0.0 {
+        adjusted_q = if scale == 0.0 {
+            q.zeros_like()?
+        } else {
+            q.neg()?
+        };
+        (&adjusted_q, if scale == 0.0 { 1.0 } else { -scale })
+    } else {
+        (q, scale)
+    };
     try_forward(
         q,
         k,
