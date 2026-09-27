@@ -40,6 +40,8 @@ if not a.link_only:
         os.environ["FLASH_ATTENTION_ARCH"] = "sm_90a"
         os.environ["CUTE_DSL_ARCH"] = "sm_90a"
         os.environ["FLASH_ATTENTION_NUM_SMS"] = "132"
+    from fa4_source import stage_fa4_sources
+    staged_source, softmax_backport = stage_fa4_sources()
     import torch
     import flash_attn.cute.interface as interface
     if not a.compile_only and torch.cuda.get_device_capability() != (9, 0):
@@ -99,6 +101,7 @@ if not a.link_only:
                                     causal=False, window=[None, None], dtype=dtype_name))
     manifest = {
         "abi_version": 4,
+        "softmax_backport": softmax_backport,
         "architecture": "sm_90a",
         "executed_during_export": not a.compile_only,
         "deberta_score_sha256": digest(pathlib.Path(__file__).with_name("deberta_score.py")) if a.deberta else None,
