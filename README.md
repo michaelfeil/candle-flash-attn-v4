@@ -11,7 +11,7 @@ coverage. No crates.io release or universal performance/accuracy claim yet.
 
 ## Current native bundle
 
-Hopper SM90, FP16/BF16, packed self-attention. Head counts and softmax scale
+Hopper SM90, FP16/BF16, packed self- and cross-attention. Head counts and softmax scale
 are runtime parameters; the current export families are:
 
 | Q/KV relationship | Head dimension | Mask |
@@ -27,7 +27,7 @@ int32 and are clamped to the longest sequence before launch to avoid index
 overflow without changing the mask.
 
 Sequence lengths are dynamic. Contiguous head dimensions and aligned row strides
-are required. CPU execution, backward, cross-attention, arbitrary masks, and FP8
+are required. CPU execution, backward, arbitrary masks, and FP8
 are not exposed by this initial bundle. Unsupported inputs return an
 error. The wrapper never silently switches to another attention implementation.
 
@@ -90,6 +90,14 @@ let output = flash_attn_varlen(&q, &k, &v, &lengths, Mask::Local64)?;
 offset read is needed per attention call. The wrapper retains Candle pointer
 guards, respects the caller's stream, and checks runtime compute capability.
 
+### Cross-attention
+
+`flash_attn_varlen_cross(q, k, v, q_lengths, kv_lengths, config)` accepts separate
+validated boundary objects with the same batch count. Q and KV token totals may
+differ. Masks align the bottom-right corners: query `i` is centered at key
+`i + kv_length - q_length`. This also applies to sliding windows. Fully masked
+rows produce zeros. Empty sequences are still rejected.
+
 ## Initial validation
 
 The standalone release-profile Cargo test build passed. On H100, global,
@@ -100,7 +108,11 @@ nondefault softmax scale.
 Strided views with nonzero offsets matched contiguous outputs exactly. Invalid boundaries and
 token-count mismatches were rejected. Compute Sanitizer reported zero errors,
 including after a fresh AOT export/link using this repository's build script.
-This focused test does not replace model-level accuracy qualification.
+Unequal Q/KV lengths passed independent per-sequence mask references in both
+precisions, including fully masked causal rows, asymmetric and oversized windows,
+and mismatched-batch rejection. The existing self-attention tests also passed
+against the new native ABI. These tests do not replace model-level accuracy
+qualification.
 
 ## Feature-completeness target
 
@@ -111,7 +123,7 @@ collection of model presets. The current crate is not feature-complete.
 |---|---|
 | Dtypes | FP16/BF16 implemented; architecture-specific FP8 and scale tensors pending |
 | Head geometry | Runtime head counts for the families above; configurable dimensions, value dimensions, and all upstream GQA ratios pending |
-| Layouts | Packed self-attention implemented; native dense and cross-attention paths pending |
+| Layouts | Packed self/cross-attention implemented; native dense paths pending |
 | Masks | Global, causal, finite two-sided windows for the families above; remaining combinations and one-sided windows pending |
 | GPU architectures | SM90 runtime tested; SM80/SM120 compile probes only; full architecture-aware exports and dispatch pending |
 | Decode and scheduling | Paged KV, split-KV, scheduler metadata and associated workspace lifecycle pending |
