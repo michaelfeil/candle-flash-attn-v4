@@ -5,7 +5,7 @@ use candle::{CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, S
 use std::ffi::{c_char, c_void, CStr};
 
 extern "C" {
-    fn candle_fa4_forward_v3(
+    fn candle_fa4_forward_v4(
         mode: i32,
         dtype: i32,
         device: i32,
@@ -15,7 +15,9 @@ extern "C" {
         v: *mut c_void,
         o: *mut c_void,
         offsets: *mut c_void,
+        offsets_k: *mut c_void,
         total: i64,
+        total_k: i64,
         batch: i64,
         heads: i64,
         kv_heads: i64,
@@ -24,10 +26,10 @@ extern "C" {
         right: i32,
         strides: *const i64,
     ) -> i32;
-    fn candle_fa4_error_v3() -> *const c_char;
+    fn candle_fa4_error_v4() -> *const c_char;
 }
 
-/// Validated packed self-attention sequence boundaries, uploaded once to CUDA.
+/// Validated packed sequence boundaries, uploaded once to CUDA.
 /// Empty sequences are currently rejected. Boundaries are uploaded at construction.
 #[derive(Clone)]
 pub struct Seqlens {
@@ -118,8 +120,28 @@ pub fn flash_attn_varlen_with_config(
     lengths: &Seqlens,
     config: AttentionConfig,
 ) -> Result<Tensor> {
-    if q.rank() != 3 || q.dims()[0] != lengths.total {
+    flash_attn_varlen_cross(q, k, v, lengths, lengths, config)
+}
+
+/// Packed cross-attention with independent Q/KV lengths and equal batch counts.
+/// Causal and local masks align the bottom-right corners: query position i is
+/// centered on key position i + kv_length - q_length. Fully masked rows return zero.
+pub fn flash_attn_varlen_cross(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    q_lengths: &Seqlens,
+    kv_lengths: &Seqlens,
+    config: AttentionConfig,
+) -> Result<Tensor> {
+    if q.rank() != 3 || q.dims()[0] != q_lengths.total {
         candle::bail!("Q token count does not match sequence boundaries")
+    }
+    if k.rank() != 3
+        || k.dims()[0] != kv_lengths.total
+        || q_lengths.offsets.elem_count() != kv_lengths.offsets.elem_count()
+    {
+        candle::bail!("KV token count or Q/KV batch count does not match boundaries")
     }
     let (causal, left, right) = match config.mask {
         Mask::Global => (false, None, None),
@@ -130,8 +152,8 @@ pub fn flash_attn_varlen_with_config(
     if left.into_iter().chain(right).any(|v| v > i32::MAX as usize) {
         candle::bail!("attention window exceeds int32")
     }
-    let left = left.map(|v| v.min(lengths.max_len - 1));
-    let right = right.map(|v| v.min(lengths.max_len - 1));
+    let left = left.map(|v| v.min(q_lengths.max_len.max(kv_lengths.max_len) - 1));
+    let right = right.map(|v| v.min(q_lengths.max_len.max(kv_lengths.max_len) - 1));
     let scale = config
         .softmax_scale
         .unwrap_or(((q.dims()[2] as f64).sqrt().recip()) as f32);
@@ -142,8 +164,8 @@ pub fn flash_attn_varlen_with_config(
         q,
         k,
         v,
-        &lengths.offsets,
-        &lengths.offsets,
+        &q_lengths.offsets,
+        &kv_lengths.offsets,
         scale,
         causal,
         left,
@@ -169,13 +191,17 @@ fn try_forward(
     left: Option<usize>,
     right: Option<usize>,
 ) -> Result<Option<Tensor>> {
-    if q.rank() != 3 || k.rank() != 3 || v.dims() != k.dims() || offsets_q.id() != offsets_k.id() {
+    if q.rank() != 3
+        || k.rank() != 3
+        || v.dims() != k.dims()
+        || offsets_q.elem_count() != offsets_k.elem_count()
+    {
         return Ok(None);
     }
     let (total, h, d) = q.dims3()?;
     let (kt, hk, kd) = k.dims3()?;
     if total == 0
-        || total != kt
+        || kt == 0
         || d != kd
         || total
             .checked_mul(h * d)
@@ -209,13 +235,15 @@ fn try_forward(
             return Ok(None);
         }
     }
-    if offsets_q.rank() != 1
-        || offsets_q.elem_count() < 2
-        || offsets_q.dtype() != DType::U32
-        || !offsets_q.is_contiguous()
-        || !offsets_q.device().same_device(q.device())
-    {
-        return Ok(None);
+    for offsets in [offsets_q, offsets_k] {
+        if offsets.rank() != 1
+            || offsets.elem_count() < 2
+            || offsets.dtype() != DType::U32
+            || !offsets.is_contiguous()
+            || !offsets.device().same_device(q.device())
+        {
+            return Ok(None);
+        }
     }
     q.apply_op3_no_bwd(
         k,
@@ -226,6 +254,7 @@ fn try_forward(
             left: left.map_or(-1, |v| v as i32),
             right: right.map_or(-1, |v| v as i32),
             offsets: offsets_q.clone(),
+            offsets_k: offsets_k.clone(),
         },
     )
     .map(Some)
@@ -237,6 +266,7 @@ struct Fa4 {
     left: i32,
     right: i32,
     offsets: Tensor,
+    offsets_k: Tensor,
 }
 impl CustomOp3 for Fa4 {
     fn name(&self) -> &'static str {
@@ -309,6 +339,13 @@ impl Fa4 {
         let offsets = offset_storage
             .as_cuda_slice::<u32>()?
             .slice(ol.start_offset()..);
+        let (offset_k_storage, okl) = self.offsets_k.storage_and_layout();
+        let Storage::Cuda(offset_k_storage) = &*offset_k_storage else {
+            candle::bail!("FA4 KV offsets must be CUDA")
+        };
+        let offsets_k = offset_k_storage
+            .as_cuda_slice::<u32>()?
+            .slice(okl.start_offset()..);
         let mut output = unsafe { dev.alloc::<T>(shape.elem_count()) }?;
         let out_layout = Layout::contiguous(&shape);
         let strides: Vec<i64> = [ql, kl, vl, &out_layout]
@@ -320,10 +357,11 @@ impl Fa4 {
         let (kp, _k_guard) = k.device_ptr(&stream);
         let (vp, _v_guard) = v.device_ptr(&stream);
         let (cp, _c_guard) = offsets.device_ptr(&stream);
+        let (ckp, _ck_guard) = offsets_k.device_ptr(&stream);
         {
             let (op, _o_guard) = output.device_ptr_mut(&stream);
             let rc = unsafe {
-                candle_fa4_forward_v3(
+                candle_fa4_forward_v4(
                     self.mode,
                     dtype,
                     stream.context().ordinal() as i32,
@@ -333,7 +371,9 @@ impl Fa4 {
                     vp as *mut c_void,
                     op as *mut c_void,
                     cp as *mut c_void,
+                    ckp as *mut c_void,
                     shape.dims()[0] as i64,
+                    kl.shape().dims()[0] as i64,
                     (self.offsets.elem_count() - 1) as i64,
                     shape.dims()[1] as i64,
                     kl.shape().dims()[1] as i64,
@@ -344,7 +384,7 @@ impl Fa4 {
                 )
             };
             if rc != 0 {
-                let error = unsafe { CStr::from_ptr(candle_fa4_error_v3()) }.to_string_lossy();
+                let error = unsafe { CStr::from_ptr(candle_fa4_error_v4()) }.to_string_lossy();
                 candle::bail!("FA4 native launch failed: {error}")
             }
         }
