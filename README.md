@@ -183,6 +183,17 @@ amplify sharply in later MLP layers. This preserves FA4's kernel and arithmetic
 precision while aligning the reduction order. It is not a universal bitwise or
 task-accuracy guarantee across models, shapes, devices, or future upstream versions.
 
+The causal d128 export also uses 64 keys per tile, matching FA2's online-softmax
+block boundaries. Upstream's 128-key tile changes when probabilities are rounded
+to FP16/BF16. On captured Qwen3-Embedding-8B inputs, using 64 keys removed all
+differences across 36 layers in both precisions. End-to-end qualification and
+performance are still shape dependent; matching FA2 does not imply every other
+valid attention implementation is less accurate. This override is limited to
+SM90 causal d128, and the manifest records both interface source hashes.
+In an H100 Qwen-shaped kernel probe, it reduced latency by 3–9% for batches at
+128/512 tokens and increased latency by 3–5% around 2048 tokens. These are
+attention-only measurements, not full-model throughput estimates.
+
 ### Concurrent native initialization
 
 The bridge serializes each export's first launch to avoid a CuTe DSL 4.7.1
