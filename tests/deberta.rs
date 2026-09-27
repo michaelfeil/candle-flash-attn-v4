@@ -86,3 +86,33 @@ fn packed_relative_attention_matches_independent_reference() -> Result<()> {
     }
     Ok(())
 }
+
+// HF rounds c2p+p2c before adding QK. The alternate sequential grouping
+// produces a nonuniform softmax here, while the reference yields exactly 1/2.
+#[test]
+fn relative_bias_rounds_before_adding_nonzero_content() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    for dtype in [DType::F16, DType::BF16] {
+        let mut qk = vec![0f32; 128];
+        qk[0] = 16.;
+        qk[64] = 16.;
+        let qk = Tensor::from_vec(qk, (2, 1, 64), &dev)?.to_dtype(dtype)?;
+        let values = Tensor::from_vec([vec![0f32; 64], vec![1f32; 64]].concat(), (2, 1, 64), &dev)?
+            .to_dtype(dtype)?;
+        let c2p = Tensor::from_vec(vec![-256f32; 8], (1, 2, 4), &dev)?.to_dtype(dtype)?;
+        let delta = if dtype == DType::F16 { 0.0625 } else { 0.25 };
+        let p2c = Tensor::from_vec([vec![-delta; 4], vec![delta; 4]].concat(), (1, 2, 4), &dev)?
+            .to_dtype(dtype)?;
+        let seq = Seqlens::new(&[0, 2], &dev)?;
+        let buckets = RelativeBuckets::new(2, 2, false, 512, &dev)?;
+        let output = deberta_attn_varlen(&qk, &qk, &values, &c2p, &p2c, &seq, &buckets)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert!(
+            output.iter().all(|v| (v - 0.5).abs() < 0.001),
+            "{dtype:?}: {output:?}"
+        );
+    }
+    Ok(())
+}

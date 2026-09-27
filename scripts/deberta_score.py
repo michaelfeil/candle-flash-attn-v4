@@ -10,7 +10,10 @@ def deberta_score(score, b_idx, h_idx, q_idx, kv_idx, seqlen_info, aux_tensors):
     hi = cute.make_rmem_tensor(1, cutlass.Int32); hi.store(h_idx)
     idx = buckets[qi[0] - ki[0] + (buckets.shape[0] // 2)]
     val = cute.make_rmem_tensor(1, c2p.element_type)
-    # HF performs these additions in model dtype. QK has already used scaled K.
+    # HF disentangled_attention_bias first adds c2p + p2c in model dtype.
+    # Its caller then adds that rounded bias to QK (also model dtype).
+    # Keep this grouping: (QK + c2p) + p2c would change the rounding.
+    # QK has already used scaled K.
     rel = (c2p[hi[0], qi[0] + seqlen_info.offset_q, idx].to(cutlass.Float32)
            + p2c[hi[0], ki[0] + seqlen_info.offset_k, idx].to(cutlass.Float32)).to(c2p.element_type)
     val[0] = rel
