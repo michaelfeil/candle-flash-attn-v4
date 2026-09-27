@@ -1,4 +1,4 @@
-"""Build the experimental Hopper FP16 bridge; Python is needed only at build time.
+"""Build the experimental Hopper FP16/BF16 bridge; Python is needed only at build time.
 
 Use the tested FA4 revision e9cf2c1651d2303191eb40a739a3c135fda00999 and
 nvidia-cutlass-dsl 4.7.1 in an isolated environment. Pass the CuTe runtime
@@ -39,28 +39,30 @@ if not a.link_only:
     a.output.mkdir(parents=True, exist_ok=True)
     objects, kernels = [], []
     cu = torch.tensor([0, 127, 256], device="cuda", dtype=torch.int32)
-    for name, h, hk, d, causal, window in [
-        ("bert", 16, 16, 64, False, (None, None)),
-        ("modern_local", 12, 12, 64, False, (64, 64)),
-        ("qwen", 32, 8, 128, True, (None, None)),
-    ]:
-        q = torch.zeros((256, h, d), device="cuda", dtype=torch.float16)
-        k = torch.zeros((256, hk, d), device="cuda", dtype=torch.float16)
-        previous = set(interface._flash_attn_fwd.compile_cache.cache)
-        interface.flash_attn_varlen_func(q, k, k, cu_seqlens_q=cu, cu_seqlens_k=cu,
-                                        max_seqlen_q=129, max_seqlen_k=129,
-                                        causal=causal, window_size=window)
-        fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
-        if len(fresh) != 1:
-            raise RuntimeError(f"Unexpected compilation count for {name}: {len(fresh)}")
-        compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
-        symbol = f"fa4_{name}_fp16"
-        obj = a.output / f"{symbol}.o"
-        compiled.export_to_c(str(obj), symbol)
-        objects.append(str(obj))
-        kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
-                            causal=causal, window=window))
+    for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
+        for name, h, hk, d, causal, window in [
+            ("bert", 16, 16, 64, False, (None, None)),
+            ("modern_local", 12, 12, 64, False, (64, 64)),
+            ("qwen", 32, 8, 128, True, (None, None)),
+        ]:
+            q = torch.zeros((256, h, d), device="cuda", dtype=dtype)
+            k = torch.zeros((256, hk, d), device="cuda", dtype=dtype)
+            previous = set(interface._flash_attn_fwd.compile_cache.cache)
+            interface.flash_attn_varlen_func(q, k, k, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                                            max_seqlen_q=129, max_seqlen_k=129,
+                                            causal=causal, window_size=window)
+            fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+            if len(fresh) != 1:
+                raise RuntimeError(f"Unexpected compilation count for {name}: {len(fresh)}")
+            compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+            symbol = f"fa4_{name}_{dtype_name}"
+            obj = a.output / f"{symbol}.o"
+            compiled.export_to_c(str(obj), symbol)
+            objects.append(str(obj))
+            kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
+                                causal=causal, window=window, dtype=dtype_name))
     manifest = {
+        "abi_version": 2,
         "kernels": kernels,
         "fa4_python_sources": {str(f.relative_to(pathlib.Path(interface.__file__).parent)): digest(f)
                                for f in sorted(pathlib.Path(interface.__file__).parent.rglob("*.py"))},
@@ -71,6 +73,8 @@ if not a.link_only:
     (a.output / "manifest.json").write_text(json.dumps(manifest, indent=2))
 else:
     manifest = json.loads((a.output / "manifest.json").read_text())
+    if manifest.get("abi_version") != 2:
+        raise RuntimeError("Re-export the native bundle for ABI version 2")
     objects = [str(a.output / (k["symbol"] + ".o")) for k in manifest["kernels"]]
     for obj in objects:
         path = pathlib.Path(obj)
