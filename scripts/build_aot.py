@@ -8,6 +8,8 @@ build container to avoid requiring a newer libstdc++ than the serving image.
 Set FA4_NATIVE_LIB_DIR to the output directory when building this crate. Add that directory to LD_LIBRARY_PATH when serving.
 """
 import argparse
+import contextlib
+import os
 import hashlib
 import importlib.metadata
 import json
@@ -25,69 +27,80 @@ phase = p.add_mutually_exclusive_group()
 phase.add_argument("--export-only", action="store_true", help="Export on the build GPU before linking in the deployment toolchain")
 phase.add_argument("--link-only", action="store_true", help="Link existing exports; no Python GPU packages required")
 p.add_argument("--deberta", action="store_true", help="Also export packed DeBERTa relative attention")
+p.add_argument("--compile-only", action="store_true", help="Export SM90 using fake tensors without a build GPU; runtime validation is still required")
 a = p.parse_args()
+if a.compile_only and a.link_only:
+    p.error("--compile-only applies to export, not --link-only")
 a.output.mkdir(parents=True, exist_ok=True)
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 if not a.link_only:
+    if a.compile_only:
+        os.environ["FLASH_ATTENTION_ARCH"] = "sm_90a"
+        os.environ["CUTE_DSL_ARCH"] = "sm_90a"
+        os.environ["FLASH_ATTENTION_NUM_SMS"] = "132"
     import torch
     import flash_attn.cute.interface as interface
-    if torch.cuda.get_device_capability() != (9, 0):
+    if not a.compile_only and torch.cuda.get_device_capability() != (9, 0):
         raise RuntimeError("This prototype exports SM90 kernels and requires a Hopper build GPU")
     if importlib.metadata.version("nvidia-cutlass-dsl") != "4.7.1":
         raise RuntimeError("The private export API is validated with cutlass-dsl 4.7.1 only")
     a.output.mkdir(parents=True, exist_ok=True)
     objects, kernels = [], []
-    cu = torch.tensor([0, 127, 256], device="cuda", dtype=torch.int32)
-    for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
-        for name, h, hk, d, causal, window in [
-            ("bert", 16, 16, 64, False, (None, None)),
-            ("modern_local", 12, 12, 64, False, (64, 64)),
-            ("qwen", 32, 8, 128, True, (None, None)),
-        ]:
-            q = torch.zeros((256, h, d), device="cuda", dtype=dtype)
-            k = torch.zeros((256, hk, d), device="cuda", dtype=dtype)
-            previous = set(interface._flash_attn_fwd.compile_cache.cache)
-            interface.flash_attn_varlen_func(q, k, k, cu_seqlens_q=cu, cu_seqlens_k=cu,
-                                            max_seqlen_q=129, max_seqlen_k=129,
-                                            causal=causal, window_size=window)
-            fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
-            if len(fresh) != 1:
-                raise RuntimeError(f"Unexpected compilation count for {name}: {len(fresh)}")
-            compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
-            symbol = f"fa4_{name}_{dtype_name}"
-            obj = a.output / f"{symbol}.o"
-            compiled.export_to_c(str(obj), symbol)
-            objects.append(str(obj))
-            kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
-                                causal=causal, window=window, dtype=dtype_name))
-    if a.deberta:
-        # SM90 varlen scheduling derives its grid from runtime tensor sizes and
-        # cumulative lengths. The 129 below is an export example, not a bound
-        # baked into FlashAttentionForwardSm90.__call__. See the long-sequence
-        # Rust regression before changing the pinned upstream implementation.
-        from deberta_score import deberta_score
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    with FakeTensorMode() if a.compile_only else contextlib.nullcontext():
+        cu = torch.tensor([0, 127, 256], device="cuda", dtype=torch.int32)
         for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
-            q = torch.zeros((256, 12, 64), device="cuda", dtype=dtype)
-            rel = torch.zeros((12, 256, 512), device="cuda", dtype=dtype)
-            lut = torch.zeros(257, device="cuda", dtype=torch.int32)
-            previous = set(interface._flash_attn_fwd.compile_cache.cache)
-            interface.flash_attn_varlen_func(q, q, q, cu_seqlens_q=cu, cu_seqlens_k=cu,
-                max_seqlen_q=129, max_seqlen_k=129, softmax_scale=1.,
-                score_mod=deberta_score, aux_tensors=[rel, rel, lut])
-            fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
-            if len(fresh) != 1:
-                raise RuntimeError("Unexpected DeBERTa compilation count")
-            compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
-            symbol = f"fa4_deberta_{dtype_name}"
-            obj = a.output / f"{symbol}.o"
-            compiled.export_to_c(str(obj), symbol)
-            objects.append(str(obj))
-            kernels.append(dict(symbol=symbol, heads=12, kv_heads=12, d=64,
-                                causal=False, window=[None, None], dtype=dtype_name))
+            for name, h, hk, d, causal, window in [
+                ("bert", 16, 16, 64, False, (None, None)),
+                ("modern_local", 12, 12, 64, False, (64, 64)),
+                ("qwen", 32, 8, 128, True, (None, None)),
+            ]:
+                q = torch.zeros((256, h, d), device="cuda", dtype=dtype)
+                k = torch.zeros((256, hk, d), device="cuda", dtype=dtype)
+                previous = set(interface._flash_attn_fwd.compile_cache.cache)
+                interface.flash_attn_varlen_func(q, k, k, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                                                max_seqlen_q=129, max_seqlen_k=129,
+                                                causal=causal, window_size=window)
+                fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+                if len(fresh) != 1:
+                    raise RuntimeError(f"Unexpected compilation count for {name}: {len(fresh)}")
+                compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+                symbol = f"fa4_{name}_{dtype_name}"
+                obj = a.output / f"{symbol}.o"
+                compiled.export_to_c(str(obj), symbol)
+                objects.append(str(obj))
+                kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
+                                    causal=causal, window=window, dtype=dtype_name))
+        if a.deberta:
+            # SM90 varlen scheduling derives its grid from runtime tensor sizes and
+            # cumulative lengths. The 129 below is an export example, not a bound
+            # baked into FlashAttentionForwardSm90.__call__. See the long-sequence
+            # Rust regression before changing the pinned upstream implementation.
+            from deberta_score import deberta_score
+            for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
+                q = torch.zeros((256, 12, 64), device="cuda", dtype=dtype)
+                rel = torch.zeros((12, 256, 512), device="cuda", dtype=dtype)
+                lut = torch.zeros(257, device="cuda", dtype=torch.int32)
+                previous = set(interface._flash_attn_fwd.compile_cache.cache)
+                interface.flash_attn_varlen_func(q, q, q, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                    max_seqlen_q=129, max_seqlen_k=129, softmax_scale=1.,
+                    score_mod=deberta_score, aux_tensors=[rel, rel, lut])
+                fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+                if len(fresh) != 1:
+                    raise RuntimeError("Unexpected DeBERTa compilation count")
+                compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+                symbol = f"fa4_deberta_{dtype_name}"
+                obj = a.output / f"{symbol}.o"
+                compiled.export_to_c(str(obj), symbol)
+                objects.append(str(obj))
+                kernels.append(dict(symbol=symbol, heads=12, kv_heads=12, d=64,
+                                    causal=False, window=[None, None], dtype=dtype_name))
     manifest = {
         "abi_version": 4,
+        "architecture": "sm_90a",
+        "executed_during_export": not a.compile_only,
         "deberta_score_sha256": digest(pathlib.Path(__file__).with_name("deberta_score.py")) if a.deberta else None,
         "kernels": kernels,
         "fa4_python_sources": {str(f.relative_to(pathlib.Path(interface.__file__).parent)): digest(f)
