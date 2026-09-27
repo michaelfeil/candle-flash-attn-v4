@@ -5,6 +5,7 @@ use candle::{CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, S
 use std::ffi::{c_char, c_void, CStr};
 
 extern "C" {
+    fn candle_fa4_compute_capability_v1() -> i32;
     fn candle_fa4_forward_v4(
         mode: i32,
         dtype: i32,
@@ -27,6 +28,12 @@ extern "C" {
         strides: *const i64,
     ) -> i32;
     fn candle_fa4_error_v4() -> *const c_char;
+}
+
+/// CUDA compute capability of the linked native bundle (e.g. 89 or 120).
+/// Callers may use this to select a fallback before invoking FA4.
+pub fn compiled_compute_capability() -> i32 {
+    unsafe { candle_fa4_compute_capability_v1() }
 }
 
 /// Validated packed sequence boundaries, uploaded once to CUDA.
@@ -339,8 +346,13 @@ impl Fa4 {
             .context()
             .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
             .map_err(candle::Error::wrap)?;
-        if (major, minor) != (9, 0) {
-            candle::bail!("this AOT bundle requires SM90; other FA4 targets are not packaged yet")
+        if major * 10 + minor != compiled_compute_capability() {
+            candle::bail!(
+                "FA4 bundle targets SM{}, device is SM{}{}",
+                compiled_compute_capability(),
+                major,
+                minor
+            )
         }
         let shape = ql.shape().clone();
         let q = q.as_cuda_slice::<T>()?.slice(ql.start_offset()..);
