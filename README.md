@@ -41,12 +41,12 @@ target of this upstream FA4 implementation.
 
 ## Build
 
-Use Linux, a Hopper build GPU, CUDA, Python with CUDA-compatible PyTorch, and a
+Use Linux, CUDA, Python with CUDA-compatible PyTorch, and a
 C++17 compiler. Install build dependencies in an isolated environment:
 
 ```sh
 python -m pip install -r requirements-build.txt
-python scripts/build_aot.py build/sm90 --export-only
+python scripts/build_aot.py build/sm90 --compile-only --export-only
 python scripts/build_aot.py build/sm90 --link-only \
   --runtime-dir /path/to/cutlass/cute_dsl/lib \
   --ffi-root /path/to/site-packages/tvm_ffi
@@ -54,6 +54,10 @@ export FA4_NATIVE_LIB_DIR="$PWD/build/sm90"
 export LD_LIBRARY_PATH="$FA4_NATIVE_LIB_DIR:${LD_LIBRARY_PATH:-}"
 cargo test --test attention
 ```
+
+`--compile-only` uses fake tensors to export SM90 kernels without a build GPU.
+It does not establish runtime correctness; the manifest records whether export
+executed kernels. Omit it to export and execute on a Hopper GPU.
 
 Choose the CuTe runtime compatible with the deployment CUDA version. The export
 and link phases can run separately so the C++ compiler matches the deployment
