@@ -49,3 +49,36 @@ extern "C" int candle_fa4_forward_v4(int mode,int dtype,int device,void* stream,
   last_error.clear();return 0;
  }catch(const std::exception& e){last_error=e.what();return -1;}
 }
+
+#ifdef FA4_DEBERTA
+extern "C" int __tvm_ffi_fa4_deberta_fp16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
+extern "C" int __tvm_ffi_fa4_deberta_bf16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
+// Contiguous packed self-attention. Relative tables are [heads,total,2*span],
+// and bucket IDs are a validated lookup for signed local q-k differences.
+extern "C" int candle_fa4_deberta_v1(int dtype,int device,void* stream,
+ void* q,void* k,void* v,void* o,void* offsets,void* c2p,void* p2c,void* buckets,
+ int64_t total,int64_t batch,int64_t heads,int64_t span,int64_t lut_len) {
+ try {
+  if(dtype<0||dtype>1||total<=0||total>INT32_MAX||batch<=0||batch>=INT32_MAX||heads<=0||heads>INT32_MAX/64||span<=0||span>INT32_MAX/2||lut_len<=0||lut_len>INT32_MAX||lut_len%2!=1
+     ||total>INT32_MAX/(heads*64)||total>INT32_MAX/(2*span)||heads>INT32_MAX/(total*2*span))
+   throw std::runtime_error("invalid DeBERTa geometry");
+  static tvm::ffi::Function fns[]={
+   tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_deberta_fp16,nullptr),
+   tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_deberta_bf16,nullptr)};
+  DLDataType dt{static_cast<uint8_t>(dtype==0?kDLFloat:kDLBfloat),16,1}, it{kDLInt,32,1};
+  int64_t shape[]={total,heads,64},stride[]={heads*64,64,1},cs[]={batch+1},one[]={1};
+  int64_t rs[]={heads,total,2*span},rst[]={total*2*span,2*span,1},ls[]={lut_len};
+  auto tensor=[&](void* p,int n,int64_t* sh,int64_t* st,DLDataType type){return DLTensor{p,{kDLCUDA,device},n,type,sh,st,0};};
+  auto qt=tensor(q,3,shape,stride,dt),kt=tensor(k,3,shape,stride,dt),vt=tensor(v,3,shape,stride,dt),ot=tensor(o,3,shape,stride,dt);
+  auto ct=tensor(offsets,1,cs,one,it),at=tensor(c2p,3,rs,rst,dt),bt=tensor(p2c,3,rs,rst,dt),lt=tensor(buckets,1,ls,one,it);
+  // Borrowed storage stays owned by Candle. The stack DLPack wrappers live
+  // through the synchronous launch call; no deleter frees their data.
+  DLManagedTensor am{at,nullptr,nullptr},bm{bt,nullptr,nullptr},lm{lt,nullptr,nullptr};
+  tvm::ffi::Array<tvm::ffi::Any> tensors{tvm::ffi::Tensor::FromDLPack(&am),tvm::ffi::Tensor::FromDLPack(&bm),tvm::ffi::Tensor::FromDLPack(&lm)};
+  tvm::ffi::Array<tvm::ffi::Any> aux{tensors,nullptr};
+  StreamScope scope(device,stream);
+  fns[dtype](&qt,&kt,&vt,&ot,nullptr,1.0,&ct,&ct,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,aux,nullptr,nullptr);
+  last_error.clear();return 0;
+ } catch(const std::exception& e){last_error=e.what();return -1;}
+}
+#endif

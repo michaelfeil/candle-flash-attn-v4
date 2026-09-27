@@ -404,3 +404,8 @@ impl Fa4 {
         Ok((CudaStorage::wrap_cuda_slice(output, dev.clone()), shape))
     }
 }
+
+#[cfg(feature = "deberta")]
+mod deberta;
+#[cfg(feature = "deberta")]
+pub use deberta::{deberta_attn_varlen, RelativeBuckets};

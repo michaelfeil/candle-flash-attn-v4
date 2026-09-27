@@ -145,3 +145,24 @@ FA3 kernel rebasing belongs in the separate `candle-flash-attn-v3` repository.
 
 Wrapper code: MIT OR Apache-2.0. Upstream FlashAttention: BSD-3-Clause (see
 `LICENSE-UPSTREAM`). No upstream attention-kernel authorship is claimed here.
+
+### Experimental DeBERTa-v2/v3 relative attention
+
+Build the native bundle with `scripts/build_aot.py --deberta` and enable the
+Rust `deberta` feature. `deberta_attn_varlen` accepts packed FP16/BF16 d64
+self-attention on SM90, validated `Seqlens`, a `RelativeBuckets` lookup, and
+precomputed content-to-position / position-to-content tables. It uses the same
+FA4 tiled online-softmax kernel with a score hook; it never allocates an
+attention matrix or pads a sequence to the batch maximum.
+
+Q/K/V use `[total_tokens, heads, 64]`; the two relative tables use
+`[heads, total_tokens, 2 * relative_span]`. Scale K and the relative tables as
+documented on the Rust function. The caller must preserve the model's scaling
+and projection rules. Workspace is linear in total tokens for a fixed relative
+span; it is not zero, and callers must still enforce a total-token budget.
+
+This operation is inference-only and does not implement arbitrary masks,
+cross-attention, or original DeBERTa-v1 semantics. Unsupported inputs return
+errors. There is no padded fallback after an execution error. Tiled softmax is
+numerically close to eager attention, not bitwise identical; model/task quality
+must be qualified separately.
