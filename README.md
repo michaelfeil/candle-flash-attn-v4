@@ -170,3 +170,15 @@ cross-attention, or original DeBERTa-v1 semantics. Unsupported inputs return
 errors. There is no padded fallback after an execution error. Tiled softmax is
 numerically close to eager attention, not bitwise identical; model/task quality
 must be qualified separately.
+
+### Softmax numerical compatibility
+
+The SM90 AOT build stages a private copy of the pinned FA4 source and backports
+FA2's four-lane softmax denominator reduction order (shuffle offsets 2, then 1).
+The installed package is unchanged; the manifest records original/patched source
+hashes. An unexpected upstream source change fails the export for review.
+
+The previous order produced one-ULP attention differences that ModernBERT could
+amplify sharply in later MLP layers. This preserves FA4's kernel and arithmetic
+precision while aligning the reduction order. It is not a universal bitwise or
+task-accuracy guarantee across models, shapes, devices, or future upstream versions.
