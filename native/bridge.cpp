@@ -14,17 +14,17 @@ int __tvm_ffi_fa4_qwen_bf16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
 
 }
 thread_local std::string last_error;
-extern "C" const char* candle_fa4_error_v2(){return last_error.c_str();}
+extern "C" const char* candle_fa4_error_v3(){return last_error.c_str();}
 struct StreamScope {
  int device;void* previous;
  StreamScope(int d,void* stream):device(d),previous(nullptr){if(TVMFFIEnvSetStream(kDLCUDA,d,stream,&previous))throw std::runtime_error("Unable to set TVM stream");}
  ~StreamScope(){TVMFFIEnvSetStream(kDLCUDA,device,previous,nullptr);}
 };
-// Experimental fixed specializations: 0 BERT, 1 ModernBERT local64, 2 Qwen GQA4, 3 ModernBERT global.
+// Export families: 0 global d64 MHA, 1 windowed d64 MHA, 2 causal d128 GQA4.
 // Pointers remain owned by the caller; no device allocation or synchronization here.
-extern "C" int candle_fa4_forward_v2(int mode,int dtype,int device,void* stream,void* q,void* k,void* v,void* o,void* offsets,int64_t total,int64_t batch,const int64_t* strides){
+extern "C" int candle_fa4_forward_v3(int mode,int dtype,int device,void* stream,void* q,void* k,void* v,void* o,void* offsets,int64_t total,int64_t batch,int64_t h,int64_t hk,double scale,int left,int right,const int64_t* strides){
  try{
-  if(dtype<0||dtype>1||mode<0||mode>3||total<=0||batch<=0)throw std::runtime_error("unsupported probe geometry");
+  if(dtype<0||dtype>1||mode<0||mode>2||total<=0||batch<=0)throw std::runtime_error("unsupported probe geometry");
   static tvm::ffi::Function functions[2][3] = {
     {tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_bert_fp16,nullptr),
      tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_modern_local_fp16,nullptr),
@@ -33,16 +33,19 @@ extern "C" int candle_fa4_forward_v2(int mode,int dtype,int device,void* stream,
      tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_modern_local_bf16,nullptr),
      tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_qwen_bf16,nullptr)}
   };
-  auto& fn=functions[dtype][mode==3?0:mode];
+  if(h<=0||hk<=0||!std::isfinite(scale)||(mode!=2&&h!=hk)||(mode==2&&(h%hk||h/hk!=4))
+     ||(mode==1&&(left<0||right<0)))throw std::runtime_error("unsupported attention parameters");
+  auto& fn=functions[dtype][mode];
   DLDataType data_type{static_cast<uint8_t>(dtype==0?kDLFloat:kDLBfloat),16,1};
-  int64_t h=mode==0?16:mode==2?32:12,hk=mode==2?8:h,d=mode==2?128:64;
+  int64_t d=mode==2?128:64;
   int64_t qs[]={total,h,d},ks[]={total,hk,d},cs[]={batch+1},st[12],cst[]={1};
   for(int j=0;j<12;j++)st[j]=strides[j];
   auto tensor=[&](void* p,int n,int64_t* sh,int64_t* stride,DLDataType dt){return DLTensor{p,{kDLCUDA,device},n,dt,sh,stride,0};};
   DLTensor qt=tensor(q,3,qs,st,data_type),kt=tensor(k,3,ks,st+3,data_type),vt=tensor(v,3,ks,st+6,data_type),ot=tensor(o,3,qs,st+9,data_type),ct=tensor(offsets,1,cs,cst,{kDLInt,32,1});
-  tvm::ffi::Array<tvm::ffi::Any> aux{nullptr,nullptr};tvm::ffi::Any bound=mode==1?tvm::ffi::Any(int64_t(64)):tvm::ffi::Any(nullptr);
+  tvm::ffi::Array<tvm::ffi::Any> aux{nullptr,nullptr};tvm::ffi::Any lb=mode==1?tvm::ffi::Any(int64_t(left)):tvm::ffi::Any(nullptr);
+  tvm::ffi::Any rb=mode==1?tvm::ffi::Any(int64_t(right)):tvm::ffi::Any(nullptr);
   StreamScope scope(device,stream);
-  fn(&qt,&kt,&vt,&ot,nullptr,1./std::sqrt(double(d)),&ct,&ct,nullptr,nullptr,nullptr,bound,bound,nullptr,nullptr,aux,nullptr,nullptr);
+  fn(&qt,&kt,&vt,&ot,nullptr,scale,&ct,&ct,nullptr,nullptr,nullptr,lb,rb,nullptr,nullptr,aux,nullptr,nullptr);
   last_error.clear();return 0;
  }catch(const std::exception& e){last_error=e.what();return -1;}
 }

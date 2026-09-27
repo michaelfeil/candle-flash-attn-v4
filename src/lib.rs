@@ -5,7 +5,7 @@ use candle::{CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, S
 use std::ffi::{c_char, c_void, CStr};
 
 extern "C" {
-    fn candle_fa4_forward_v2(
+    fn candle_fa4_forward_v3(
         mode: i32,
         dtype: i32,
         device: i32,
@@ -17,9 +17,14 @@ extern "C" {
         offsets: *mut c_void,
         total: i64,
         batch: i64,
+        heads: i64,
+        kv_heads: i64,
+        scale: f64,
+        left: i32,
+        right: i32,
         strides: *const i64,
     ) -> i32;
-    fn candle_fa4_error_v2() -> *const c_char;
+    fn candle_fa4_error_v3() -> *const c_char;
 }
 
 /// Validated packed self-attention sequence boundaries, uploaded once to CUDA.
@@ -28,6 +33,7 @@ extern "C" {
 pub struct Seqlens {
     offsets: Tensor,
     total: usize,
+    max_len: usize,
 }
 impl Seqlens {
     pub fn new(offsets: &[u32], device: &candle::Device) -> Result<Self> {
@@ -45,6 +51,11 @@ impl Seqlens {
         Ok(Self {
             offsets: Tensor::new(offsets, device)?,
             total: *offsets.last().unwrap() as usize,
+            max_len: offsets
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as usize)
+                .max()
+                .unwrap(),
         })
     }
 }
@@ -55,6 +66,26 @@ pub enum Mask {
     Global,
     Causal,
     Local64,
+    /// Inclusive distances to the left and right of each query position.
+    Window {
+        left: usize,
+        right: usize,
+    },
+}
+
+/// Runtime attention parameters. None selects the conventional inverse-square-root scale.
+#[derive(Clone, Copy, Debug)]
+pub struct AttentionConfig {
+    pub mask: Mask,
+    pub softmax_scale: Option<f32>,
+}
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            mask: Mask::Global,
+            softmax_scale: None,
+        }
+    }
 }
 
 /// Packed self-attention, Q=[tokens, heads, dim], K/V=[tokens, kv_heads, dim].
@@ -67,15 +98,46 @@ pub fn flash_attn_varlen(
     lengths: &Seqlens,
     mask: Mask,
 ) -> Result<Tensor> {
+    flash_attn_varlen_with_config(
+        q,
+        k,
+        v,
+        lengths,
+        AttentionConfig {
+            mask,
+            softmax_scale: None,
+        },
+    )
+}
+
+/// Packed self-attention with explicit scale and mask parameters.
+pub fn flash_attn_varlen_with_config(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    lengths: &Seqlens,
+    config: AttentionConfig,
+) -> Result<Tensor> {
     if q.rank() != 3 || q.dims()[0] != lengths.total {
         candle::bail!("Q token count does not match sequence boundaries")
     }
-    let (causal, left, right) = match mask {
+    let (causal, left, right) = match config.mask {
         Mask::Global => (false, None, None),
         Mask::Causal => (true, None, None),
         Mask::Local64 => (false, Some(64), Some(64)),
+        Mask::Window { left, right } => (false, Some(left), Some(right)),
     };
-    let scale = ((q.dims()[2] as f64).sqrt().recip()) as f32;
+    if left.into_iter().chain(right).any(|v| v > i32::MAX as usize) {
+        candle::bail!("attention window exceeds int32")
+    }
+    let left = left.map(|v| v.min(lengths.max_len - 1));
+    let right = right.map(|v| v.min(lengths.max_len - 1));
+    let scale = config
+        .softmax_scale
+        .unwrap_or(((q.dims()[2] as f64).sqrt().recip()) as f32);
+    if !scale.is_finite() {
+        candle::bail!("attention scale must be finite")
+    }
     try_forward(
         q,
         k,
@@ -118,15 +180,15 @@ fn try_forward(
         || total
             .checked_mul(h * d)
             .is_none_or(|v| v > i32::MAX as usize)
-        || scale.to_bits() != ((d as f64).sqrt().recip() as f32).to_bits()
+        || h == 0
+        || hk == 0
     {
         return Ok(None);
     }
-    let mode = match (h, hk, d, causal, left, right) {
-        (16, 16, 64, false, None, None) => 0,
-        (12, 12, 64, false, Some(64), Some(64)) => 1,
-        (32, 8, 128, true, None, None) => 2,
-        (12, 12, 64, false, None, None) => 3,
+    let mode = match (d, causal, left, right) {
+        (64, false, None, None) if h == hk => 0,
+        (64, false, Some(_), Some(_)) if h == hk => 1,
+        (128, true, None, None) if h % hk == 0 && h / hk == 4 => 2,
         _ => return Ok(None),
     };
     for t in [q, k, v] {
@@ -138,6 +200,10 @@ fn try_forward(
             || t.stride()[0] < t.dims()[1] * t.dims()[2]
             || !t.stride()[0].is_multiple_of(8)
             || !t.layout().start_offset().is_multiple_of(8)
+            || (t.dims()[0] - 1)
+                .checked_mul(t.stride()[0])
+                .and_then(|v| v.checked_add(t.dims()[1] * t.dims()[2]))
+                .is_none_or(|v| v > i32::MAX as usize)
             || t.stride().iter().any(|&s| s > i32::MAX as usize)
         {
             return Ok(None);
@@ -156,6 +222,9 @@ fn try_forward(
         v,
         &Fa4 {
             mode,
+            scale,
+            left: left.map_or(-1, |v| v as i32),
+            right: right.map_or(-1, |v| v as i32),
             offsets: offsets_q.clone(),
         },
     )
@@ -164,6 +233,9 @@ fn try_forward(
 
 struct Fa4 {
     mode: i32,
+    scale: f32,
+    left: i32,
+    right: i32,
     offsets: Tensor,
 }
 impl CustomOp3 for Fa4 {
@@ -251,7 +323,7 @@ impl Fa4 {
         {
             let (op, _o_guard) = output.device_ptr_mut(&stream);
             let rc = unsafe {
-                candle_fa4_forward_v2(
+                candle_fa4_forward_v3(
                     self.mode,
                     dtype,
                     stream.context().ordinal() as i32,
@@ -263,11 +335,16 @@ impl Fa4 {
                     cp as *mut c_void,
                     shape.dims()[0] as i64,
                     (self.offsets.elem_count() - 1) as i64,
+                    shape.dims()[1] as i64,
+                    kl.shape().dims()[1] as i64,
+                    self.scale as f64,
+                    self.left,
+                    self.right,
                     strides.as_ptr(),
                 )
             };
             if rc != 0 {
-                let error = unsafe { CStr::from_ptr(candle_fa4_error_v2()) }.to_string_lossy();
+                let error = unsafe { CStr::from_ptr(candle_fa4_error_v3()) }.to_string_lossy();
                 candle::bail!("FA4 native launch failed: {error}")
             }
         }

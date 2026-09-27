@@ -11,13 +11,20 @@ coverage. No crates.io release or universal performance/accuracy claim yet.
 
 ## Current native bundle
 
-Hopper SM90, FP16/BF16, packed self-attention, default `1/sqrt(head_dim)` scale:
+Hopper SM90, FP16/BF16, packed self-attention. Head counts and softmax scale
+are runtime parameters; the current export families are:
 
-| Q heads | KV heads | Head dimension | Mask |
-|---:|---:|---:|---|
-| 12 or 16 | same | 64 | global |
-| 12 | 12 | 64 | local, inclusive +/-64 |
-| 32 | 8 | 128 | causal |
+| Q/KV relationship | Head dimension | Mask |
+|---|---:|---|
+| Any positive equal head counts (MHA) | 64 | global |
+| Any positive equal head counts (MHA) | 64 | inclusive asymmetric sliding window |
+| Q heads = 4 x KV heads (including 4/1 MQA) | 128 | causal |
+
+`AttentionConfig` accepts a finite custom softmax scale; the default is
+`1/sqrt(head_dim)`. `Mask::Window { left, right }` selects inclusive distances.
+`Mask::Local64` remains shorthand for a 64/64 window. Windows must fit signed
+int32 and are clamped to the longest sequence before launch to avoid index
+overflow without changing the mask.
 
 Sequence lengths are dynamic. Contiguous head dimensions and aligned row strides
 are required. CPU execution, backward, cross-attention, arbitrary masks, and FP8
@@ -49,8 +56,8 @@ cargo test --test attention
 Choose the CuTe runtime compatible with the deployment CUDA version. The export
 and link phases can run separately so the C++ compiler matches the deployment
 image's libc/libstdc++. The bundle contains `libfa4bridge.so`,
-`libcute_dsl_runtime.so`, and `libtvm_ffi.so`; deploy them together. The versioned native entry point prevents linking an old FP16-only bundle
-with the BF16-capable crate. Re-export old bundles before building. The generated
+`libcute_dsl_runtime.so`, and `libtvm_ffi.so`; deploy them together. The versioned native entry point prevents linking a bundle with an incompatible
+parameter ABI. Re-export old bundles before building. The generated
 manifest records source/object/library hashes and tool versions. Native
 dependencies retain their own licenses; preserve these when redistributing.
 
@@ -88,18 +95,35 @@ guards, respects the caller's stream, and checks runtime compute capability.
 The standalone release-profile Cargo test build passed. On H100, global,
 causal and local masks across packed lengths 1/7/65/129 matched an independent
 uniform-attention reference on a nondefault CUDA stream. FP16 and BF16 also
-passed a full nonuniform CPU attention reference, including GQA head mapping.
+passed a full nonuniform CPU attention reference, including GQA/MQA head mapping, new head counts, asymmetric windows, and a
+nondefault softmax scale.
 Strided views with nonzero offsets matched contiguous outputs exactly. Invalid boundaries and
 token-count mismatches were rejected. Compute Sanitizer reported zero errors,
 including after a fresh AOT export/link using this repository's build script.
 This focused test does not replace model-level accuracy qualification.
 
-## Development priorities
+## Feature-completeness target
 
-1. Standalone build, mask/layout/stream tests, and reproducible native bundles.
-2. Configuration-based exports instead of model-specific presets.
-3. Architecture-specific build and dispatch; distinguish compilation from GPU validation.
-4. Model-level numerical and performance checks before enabling FA4 in TEI.
+The goal is a general wrapper for the pinned upstream FA4 API, rather than a
+collection of model presets. The current crate is not feature-complete.
+
+| Area | Current state / remaining work |
+|---|---|
+| Dtypes | FP16/BF16 implemented; architecture-specific FP8 and scale tensors pending |
+| Head geometry | Runtime head counts for the families above; configurable dimensions, value dimensions, and all upstream GQA ratios pending |
+| Layouts | Packed self-attention implemented; native dense and cross-attention paths pending |
+| Masks | Global, causal, finite two-sided windows for the families above; remaining combinations and one-sided windows pending |
+| GPU architectures | SM90 runtime tested; SM80/SM120 compile probes only; full architecture-aware exports and dispatch pending |
+| Decode and scheduling | Paged KV, split-KV, scheduler metadata and associated workspace lifecycle pending |
+| Advanced forward | LSE, softcap, sinks, auxiliary tensors, custom score/mask functions and block sparsity need export/API coverage |
+| Training | Backward exports and Candle autograd integration pending; forward-only is not training support |
+| Distribution | Pinned AOT sources and manifests implemented; reproducible per-architecture packages and release CI pending |
+| Qualification | Layer/reference tests implemented; broader shape/dtype/device tests, model accuracy and performance gates pending |
+
+Coverage must follow upstream's actual per-architecture support. Unsupported
+combinations must fail clearly; a successful cross-compilation is not a GPU
+correctness or performance result. Python-defined custom operations require
+build-time specialization before they can be called from native Rust.
 
 FA3 kernel rebasing belongs in the separate `candle-flash-attn-v3` repository.
 
