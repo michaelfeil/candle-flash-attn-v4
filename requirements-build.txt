@@ -1,0 +1,4 @@
+nvidia-cutlass-dsl==4.7.1
+apache-tvm-ffi==0.1.14.post1
+# Install a CUDA-compatible PyTorch first. FA4 sources are pinned separately.
+flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@e9cf2c1651d2303191eb40a739a3c135fda00999#subdirectory=flash_attn/cute

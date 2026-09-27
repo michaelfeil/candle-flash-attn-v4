@@ -1,0 +1,100 @@
+"""Build the experimental Hopper FP16 bridge; Python is needed only at build time.
+
+Use the tested FA4 revision e9cf2c1651d2303191eb40a739a3c135fda00999 and
+nvidia-cutlass-dsl 4.7.1 in an isolated environment. Pass the CuTe runtime
+library directory (cu12/lib for CUDA12 serving) and the tvm_ffi package root.
+Use --export-only on the GPU host, then --link-only inside the deployment
+build container to avoid requiring a newer libstdc++ than the serving image.
+Set FA4_NATIVE_LIB_DIR to the output directory when building this crate. Add that directory to LD_LIBRARY_PATH when serving.
+"""
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import pathlib
+import shutil
+import subprocess
+
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument("output", type=pathlib.Path)
+p.add_argument("--runtime-dir", type=pathlib.Path)
+p.add_argument("--ffi-root", type=pathlib.Path)
+p.add_argument("--cxx", default="g++")
+phase = p.add_mutually_exclusive_group()
+phase.add_argument("--export-only", action="store_true", help="Export on the build GPU before linking in the deployment toolchain")
+phase.add_argument("--link-only", action="store_true", help="Link existing exports; no Python GPU packages required")
+a = p.parse_args()
+a.output.mkdir(parents=True, exist_ok=True)
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+if not a.link_only:
+    import torch
+    import flash_attn.cute.interface as interface
+    if torch.cuda.get_device_capability() != (9, 0):
+        raise RuntimeError("This prototype exports SM90 kernels and requires a Hopper build GPU")
+    if importlib.metadata.version("nvidia-cutlass-dsl") != "4.7.1":
+        raise RuntimeError("The private export API is validated with cutlass-dsl 4.7.1 only")
+    a.output.mkdir(parents=True, exist_ok=True)
+    objects, kernels = [], []
+    cu = torch.tensor([0, 127, 256], device="cuda", dtype=torch.int32)
+    for name, h, hk, d, causal, window in [
+        ("bert", 16, 16, 64, False, (None, None)),
+        ("modern_local", 12, 12, 64, False, (64, 64)),
+        ("qwen", 32, 8, 128, True, (None, None)),
+    ]:
+        q = torch.zeros((256, h, d), device="cuda", dtype=torch.float16)
+        k = torch.zeros((256, hk, d), device="cuda", dtype=torch.float16)
+        previous = set(interface._flash_attn_fwd.compile_cache.cache)
+        interface.flash_attn_varlen_func(q, k, k, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                                        max_seqlen_q=129, max_seqlen_k=129,
+                                        causal=causal, window_size=window)
+        fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+        if len(fresh) != 1:
+            raise RuntimeError(f"Unexpected compilation count for {name}: {len(fresh)}")
+        compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+        symbol = f"fa4_{name}_fp16"
+        obj = a.output / f"{symbol}.o"
+        compiled.export_to_c(str(obj), symbol)
+        objects.append(str(obj))
+        kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
+                            causal=causal, window=window))
+    manifest = {
+        "kernels": kernels,
+        "fa4_python_sources": {str(f.relative_to(pathlib.Path(interface.__file__).parent)): digest(f)
+                               for f in sorted(pathlib.Path(interface.__file__).parent.rglob("*.py"))},
+        "cutlass_dsl": importlib.metadata.version("nvidia-cutlass-dsl"),
+        "tvm_ffi": importlib.metadata.version("apache-tvm-ffi"),
+        "objects": {pathlib.Path(obj).name: digest(pathlib.Path(obj)) for obj in objects},
+    }
+    (a.output / "manifest.json").write_text(json.dumps(manifest, indent=2))
+else:
+    manifest = json.loads((a.output / "manifest.json").read_text())
+    objects = [str(a.output / (k["symbol"] + ".o")) for k in manifest["kernels"]]
+    for obj in objects:
+        path = pathlib.Path(obj)
+        if digest(path) != manifest["objects"][path.name]:
+            raise RuntimeError(f"Export changed since manifest was created: {path}")
+if a.export_only:
+    print(f"Exported kernels to {a.output}; link with a deployment-compatible C++ compiler", flush=True)
+    raise SystemExit(0)
+if a.runtime_dir is None or a.ffi_root is None:
+    p.error("Linking requires --runtime-dir and --ffi-root")
+bridge = pathlib.Path(__file__).resolve().parents[1] / "native/bridge.cpp"
+subprocess.run([a.cxx, "-std=c++17", "-O2", "-fPIC", "-shared", str(bridge),
+                *objects, f"-I{a.ffi_root / 'include'}",
+                f"-L{a.runtime_dir}", "-lcute_dsl_runtime",
+                f"-L{a.ffi_root / 'lib'}", "-ltvm_ffi",
+                "-Wl,-rpath,$ORIGIN", "-Wl,-z,defs",
+                "-o", str(a.output / "libfa4bridge.so")], check=True)
+for source in [a.runtime_dir / "libcute_dsl_runtime.so",
+               a.ffi_root / "lib/libtvm_ffi.so"]:
+    shutil.copy2(source, a.output / source.name)
+manifest.update({
+    "bridge_source_sha256": digest(bridge),
+    "cxx": subprocess.check_output([a.cxx, "--version"], text=True).splitlines()[0],
+    "libraries": {f.name: digest(f) for f in sorted(a.output.glob("*.so"))},
+})
+(a.output / "manifest.json").write_text(json.dumps(manifest, indent=2))
+print(f"Linked {len(manifest['kernels'])} kernels and native bridge in {a.output}", flush=True)
