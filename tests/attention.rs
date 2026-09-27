@@ -1,5 +1,7 @@
 use candle::{DType, Device, Result, Tensor};
-use candle_flash_attn_v4::{flash_attn_varlen, Mask, Seqlens};
+use candle_flash_attn_v4::{
+    flash_attn_varlen, flash_attn_varlen_with_config, AttentionConfig, Mask, Seqlens,
+};
 
 #[test]
 fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
@@ -8,6 +10,9 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
     let lengths = Seqlens::new(&offsets, &dev)?;
     for dtype in [DType::F16, DType::BF16] {
         for (h, hk, d, mask) in [
+            (3, 3, 64, Mask::Global),
+            (5, 5, 64, Mask::Window { left: 7, right: 13 }),
+            (4, 1, 128, Mask::Causal),
             (16, 16, 64, Mask::Global),
             (12, 12, 64, Mask::Global),
             (12, 12, 64, Mask::Local64),
@@ -26,7 +31,12 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
             let q = Tensor::from_vec(qv.clone(), (202, h, d), &dev)?.to_dtype(dtype)?;
             let k = Tensor::from_vec(kv.clone(), (202, hk, d), &dev)?.to_dtype(dtype)?;
             let v = Tensor::from_vec(vv.clone(), (202, hk, d), &dev)?.to_dtype(dtype)?;
-            let actual = flash_attn_varlen(&q, &k, &v, &lengths, mask)?
+            let scale = 0.37f32;
+            let config = AttentionConfig {
+                mask,
+                softmax_scale: Some(scale),
+            };
+            let actual = flash_attn_varlen_with_config(&q, &k, &v, &lengths, config)?
                 .to_dtype(DType::F32)?
                 .flatten_all()?
                 .to_vec1::<f32>()?;
@@ -35,10 +45,16 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
             let view = |t: &Tensor| -> Result<Tensor> {
                 Tensor::stack(&[t, t], 1)?.narrow(1, 1, 1)?.squeeze(1)
             };
-            let strided = flash_attn_varlen(&view(&q)?, &view(&k)?, &view(&v)?, &lengths, mask)?
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
+            let strided = flash_attn_varlen_with_config(
+                &view(&q)?,
+                &view(&k)?,
+                &view(&v)?,
+                &lengths,
+                config,
+            )?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
             assert_eq!(
                 actual, strided,
                 "{dtype:?} {mask:?}: strided input changed output"
@@ -49,6 +65,9 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
                     let (lo, hi) = match mask {
                         Mask::Global => (start, end),
                         Mask::Causal => (start, t + 1),
+                        Mask::Window { left, right } => {
+                            (start.max(t.saturating_sub(left)), end.min(t + right + 1))
+                        }
                         Mask::Local64 => (start.max(t.saturating_sub(64)), end.min(t + 65)),
                     };
                     for head in 0..h {
@@ -58,7 +77,7 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
                             let score: f32 = (0..d)
                                 .map(|i| qv[(t * h + head) * d + i] * kv[(key * hk + kh) * d + i])
                                 .sum();
-                            scores.push(score / (d as f32).sqrt());
+                            scores.push(score * scale);
                         }
                         let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                         for x in &mut scores {
@@ -99,6 +118,9 @@ fn packed_masks_match_uniform_attention() -> Result<()> {
     let lengths = Seqlens::new(&offsets, &dev)?;
     for dtype in [DType::F16, DType::BF16] {
         for (h, hk, d, mask) in [
+            (3, 3, 64, Mask::Global),
+            (5, 5, 64, Mask::Window { left: 7, right: 13 }),
+            (4, 1, 128, Mask::Causal),
             (16, 16, 64, Mask::Global),
             (12, 12, 64, Mask::Global),
             (12, 12, 64, Mask::Local64),
@@ -121,6 +143,10 @@ fn packed_masks_match_uniform_attention() -> Result<()> {
                     let (lo, hi) = match mask {
                         Mask::Global => (start, end),
                         Mask::Causal => (start, token + 1),
+                        Mask::Window { left, right } => (
+                            start.max(token.saturating_sub(left)),
+                            end.min(token + right + 1),
+                        ),
                         Mask::Local64 => (start.max(token.saturating_sub(64)), end.min(token + 65)),
                     };
                     let expected =
