@@ -1,12 +1,13 @@
-//! Experimental AOT FA4 bridge, limited to the explicitly exported FP16 kernels.
+//! Experimental AOT FA4 bridge, limited to the explicitly exported FP16/BF16 kernels.
 use candle::backend::BackendStorage;
 use candle::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 use candle::{CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Storage, Tensor};
 use std::ffi::{c_char, c_void, CStr};
 
 extern "C" {
-    fn fa4_probe_forward(
+    fn candle_fa4_forward_v2(
         mode: i32,
+        dtype: i32,
         device: i32,
         stream: *mut c_void,
         q: *mut c_void,
@@ -18,7 +19,7 @@ extern "C" {
         batch: i64,
         strides: *const i64,
     ) -> i32;
-    fn fa4_probe_error() -> *const c_char;
+    fn candle_fa4_error_v2() -> *const c_char;
 }
 
 /// Validated packed self-attention sequence boundaries, uploaded once to CUDA.
@@ -129,7 +130,8 @@ fn try_forward(
         _ => return Ok(None),
     };
     for t in [q, k, v] {
-        if t.dtype() != DType::F16
+        if !matches!(t.dtype(), DType::F16 | DType::BF16)
+            || t.dtype() != q.dtype()
             || !t.device().same_device(q.device())
             || t.stride()[2] != 1
             || t.stride()[1] != t.dims()[2]
@@ -188,6 +190,28 @@ impl CustomOp3 for Fa4 {
         v: &CudaStorage,
         vl: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
+        match q.dtype() {
+            DType::F16 => self.cuda_fwd_t::<half::f16>(q, ql, k, kl, v, vl, 0),
+            DType::BF16 => self.cuda_fwd_t::<half::bf16>(q, ql, k, kl, v, vl, 1),
+            _ => candle::bail!("FA4 requires FP16 or BF16"),
+        }
+    }
+}
+
+impl Fa4 {
+    #[allow(clippy::too_many_arguments)]
+    fn cuda_fwd_t<
+        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+    >(
+        &self,
+        q: &CudaStorage,
+        ql: &Layout,
+        k: &CudaStorage,
+        kl: &Layout,
+        v: &CudaStorage,
+        vl: &Layout,
+        dtype: i32,
+    ) -> Result<(CudaStorage, Shape)> {
         let dev = q.device();
         let stream = dev.cuda_stream();
         use candle::cuda_backend::cudarc::driver::sys::CUdevice_attribute::*;
@@ -203,9 +227,9 @@ impl CustomOp3 for Fa4 {
             candle::bail!("this AOT bundle requires SM90; other FA4 targets are not packaged yet")
         }
         let shape = ql.shape().clone();
-        let q = q.as_cuda_slice::<half::f16>()?.slice(ql.start_offset()..);
-        let k = k.as_cuda_slice::<half::f16>()?.slice(kl.start_offset()..);
-        let v = v.as_cuda_slice::<half::f16>()?.slice(vl.start_offset()..);
+        let q = q.as_cuda_slice::<T>()?.slice(ql.start_offset()..);
+        let k = k.as_cuda_slice::<T>()?.slice(kl.start_offset()..);
+        let v = v.as_cuda_slice::<T>()?.slice(vl.start_offset()..);
         let (offset_storage, ol) = self.offsets.storage_and_layout();
         let Storage::Cuda(offset_storage) = &*offset_storage else {
             candle::bail!("FA4 offsets must be CUDA")
@@ -213,7 +237,7 @@ impl CustomOp3 for Fa4 {
         let offsets = offset_storage
             .as_cuda_slice::<u32>()?
             .slice(ol.start_offset()..);
-        let mut output = unsafe { dev.alloc::<half::f16>(shape.elem_count()) }?;
+        let mut output = unsafe { dev.alloc::<T>(shape.elem_count()) }?;
         let out_layout = Layout::contiguous(&shape);
         let strides: Vec<i64> = [ql, kl, vl, &out_layout]
             .into_iter()
@@ -227,8 +251,9 @@ impl CustomOp3 for Fa4 {
         {
             let (op, _o_guard) = output.device_ptr_mut(&stream);
             let rc = unsafe {
-                fa4_probe_forward(
+                candle_fa4_forward_v2(
                     self.mode,
+                    dtype,
                     stream.context().ordinal() as i32,
                     stream.cu_stream() as *mut c_void,
                     qp as *mut c_void,
@@ -242,7 +267,7 @@ impl CustomOp3 for Fa4 {
                 )
             };
             if rc != 0 {
-                let error = unsafe { CStr::from_ptr(fa4_probe_error()) }.to_string_lossy();
+                let error = unsafe { CStr::from_ptr(candle_fa4_error_v2()) }.to_string_lossy();
                 candle::bail!("FA4 native launch failed: {error}")
             }
         }

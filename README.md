@@ -11,7 +11,7 @@ coverage. No crates.io release or universal performance/accuracy claim yet.
 
 ## Current native bundle
 
-Hopper SM90, FP16, packed self-attention, default `1/sqrt(head_dim)` scale:
+Hopper SM90, FP16/BF16, packed self-attention, default `1/sqrt(head_dim)` scale:
 
 | Q heads | KV heads | Head dimension | Mask |
 |---:|---:|---:|---|
@@ -20,8 +20,8 @@ Hopper SM90, FP16, packed self-attention, default `1/sqrt(head_dim)` scale:
 | 32 | 8 | 128 | causal |
 
 Sequence lengths are dynamic. Contiguous head dimensions and aligned row strides
-are required. CPU execution, backward, cross-attention, arbitrary masks, FP8,
-and BF16 are not exposed by this initial bundle. Unsupported inputs return an
+are required. CPU execution, backward, cross-attention, arbitrary masks, and FP8
+are not exposed by this initial bundle. Unsupported inputs return an
 error. The wrapper never silently switches to another attention implementation.
 
 Upstream has architecture paths for SM8x, SM90, SM10x/11x, and SM12x. That does
@@ -49,7 +49,8 @@ cargo test --test attention
 Choose the CuTe runtime compatible with the deployment CUDA version. The export
 and link phases can run separately so the C++ compiler matches the deployment
 image's libc/libstdc++. The bundle contains `libfa4bridge.so`,
-`libcute_dsl_runtime.so`, and `libtvm_ffi.so`; deploy them together. The generated
+`libcute_dsl_runtime.so`, and `libtvm_ffi.so`; deploy them together. The versioned native entry point prevents linking an old FP16-only bundle
+with the BF16-capable crate. Re-export old bundles before building. The generated
 manifest records source/object/library hashes and tool versions. Native
 dependencies retain their own licenses; preserve these when redistributing.
 
@@ -73,7 +74,7 @@ performance on those architectures.
 
 ```rust,ignore
 use candle_flash_attn_v4::{flash_attn_varlen, Mask, Seqlens};
-// q: [tokens, 12, 64], k/v: [tokens, 12, 64], CUDA FP16
+// q: [tokens, 12, 64], k/v: [tokens, 12, 64], CUDA FP16 or BF16
 let lengths = Seqlens::new(&[0, 127, 640], q.device())?;
 let output = flash_attn_varlen(&q, &k, &v, &lengths, Mask::Local64)?;
 ```
@@ -86,7 +87,9 @@ guards, respects the caller's stream, and checks runtime compute capability.
 
 The standalone release-profile Cargo test build passed. On H100, global,
 causal and local masks across packed lengths 1/7/65/129 matched an independent
-uniform-attention reference on a nondefault CUDA stream. Invalid boundaries and
+uniform-attention reference on a nondefault CUDA stream. FP16 and BF16 also
+passed a full nonuniform CPU attention reference, including GQA head mapping.
+Strided views with nonzero offsets matched contiguous outputs exactly. Invalid boundaries and
 token-count mismatches were rejected. Compute Sanitizer reported zero errors,
 including after a fresh AOT export/link using this repository's build script.
 This focused test does not replace model-level accuracy qualification.
@@ -94,7 +97,7 @@ This focused test does not replace model-level accuracy qualification.
 ## Development priorities
 
 1. Standalone build, mask/layout/stream tests, and reproducible native bundles.
-2. Configuration-based exports instead of model-specific presets, FP16/BF16.
+2. Configuration-based exports instead of model-specific presets.
 3. Architecture-specific build and dispatch; distinguish compilation from GPU validation.
 4. Model-level numerical and performance checks before enabling FA4 in TEI.
 
