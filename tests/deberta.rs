@@ -1,0 +1,88 @@
+#![cfg(feature = "deberta")]
+use candle::{DType, Device, Result, Tensor};
+use candle_flash_attn_v4::{deberta_attn_varlen, RelativeBuckets, Seqlens};
+
+#[test]
+fn packed_relative_attention_matches_independent_reference() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let lengths = [1usize, 7, 33, 65];
+    let mut cu = vec![0u32];
+    for n in lengths {
+        cu.push(cu.last().unwrap() + n as u32);
+    }
+    let total = *cu.last().unwrap() as usize;
+    let heads = 4;
+    let span = 16;
+    for dtype in [DType::F16, DType::BF16] {
+        let q = Tensor::zeros((total, heads, 64), dtype, &dev)?;
+        let v: Vec<f32> = (0..total * heads * 64)
+            .map(|i| ((i * 17 % 101) as f32 - 50.) / 64.)
+            .collect();
+        let values = Tensor::from_vec(v.clone(), (total, heads, 64), &dev)?.to_dtype(dtype)?;
+        let table = |seed: usize| -> Vec<f32> {
+            (0..heads * total * 2 * span)
+                .map(|i| ((i * seed % 31) as f32 - 15.) / 32.)
+                .collect()
+        };
+        let a = table(7);
+        let b = table(13);
+        let at = Tensor::from_vec(a.clone(), (heads, total, 2 * span), &dev)?.to_dtype(dtype)?;
+        let bt = Tensor::from_vec(b.clone(), (heads, total, 2 * span), &dev)?.to_dtype(dtype)?;
+        let seq = Seqlens::new(&cu, &dev)?;
+        let buckets = RelativeBuckets::new(65, span, false, 512, &dev)?;
+        let actual = deberta_attn_varlen(&q, &q, &values, &at, &bt, &seq, &buckets)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let mut start = 0;
+        for n in lengths {
+            for i in 0..n {
+                for h in 0..heads {
+                    let scores: Vec<f64> = (0..n)
+                        .map(|j| {
+                            // Separate content->position and transposed position->content
+                            // lookup from the mathematical definition, including clipping.
+                            let forward = (i as isize - j as isize + span as isize)
+                                .clamp(0, (2 * span - 1) as isize)
+                                as usize;
+                            let reverse = (-(j as isize - i as isize) + span as isize)
+                                .clamp(0, (2 * span - 1) as isize)
+                                as usize;
+                            ((a[(h * total + start + i) * 2 * span + forward]
+                                + b[(h * total + start + j) * 2 * span + reverse])
+                                as f64)
+                                .exp()
+                        })
+                        .collect();
+                    let sum: f64 = scores.iter().sum();
+                    for d in 0..64 {
+                        let expected: f64 = (0..n)
+                            .map(|j| scores[j] / sum * v[((start + j) * heads + h) * 64 + d] as f64)
+                            .sum();
+                        let actual = actual[((start + i) * heads + h) * 64 + d] as f64;
+                        assert!(actual.is_finite());
+                        assert!(
+                            (actual - expected).abs()
+                                < if dtype == DType::F16 { 0.001 } else { 0.008 },
+                            "{dtype:?} n={n} i={i} h={h} d={d}: {actual} vs {expected}"
+                        );
+                    }
+                }
+            }
+            start += n;
+        }
+        let too_short = RelativeBuckets::new(64, span, false, 512, &dev)?;
+        assert!(deberta_attn_varlen(&q, &q, &values, &at, &bt, &seq, &too_short).is_err());
+        assert!(deberta_attn_varlen(
+            &q,
+            &q,
+            &values,
+            &at.narrow(2, 0, span)?,
+            &bt,
+            &seq,
+            &buckets
+        )
+        .is_err());
+    }
+    Ok(())
+}

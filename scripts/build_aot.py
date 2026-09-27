@@ -24,6 +24,7 @@ p.add_argument("--cxx", default="g++")
 phase = p.add_mutually_exclusive_group()
 phase.add_argument("--export-only", action="store_true", help="Export on the build GPU before linking in the deployment toolchain")
 phase.add_argument("--link-only", action="store_true", help="Link existing exports; no Python GPU packages required")
+p.add_argument("--deberta", action="store_true", help="Also export packed DeBERTa relative attention")
 a = p.parse_args()
 a.output.mkdir(parents=True, exist_ok=True)
 def digest(path):
@@ -61,8 +62,29 @@ if not a.link_only:
             objects.append(str(obj))
             kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
                                 causal=causal, window=window, dtype=dtype_name))
+    if a.deberta:
+        from deberta_score import deberta_score
+        for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
+            q = torch.zeros((256, 12, 64), device="cuda", dtype=dtype)
+            rel = torch.zeros((12, 256, 512), device="cuda", dtype=dtype)
+            lut = torch.zeros(257, device="cuda", dtype=torch.int32)
+            previous = set(interface._flash_attn_fwd.compile_cache.cache)
+            interface.flash_attn_varlen_func(q, q, q, cu_seqlens_q=cu, cu_seqlens_k=cu,
+                max_seqlen_q=129, max_seqlen_k=129, softmax_scale=1.,
+                score_mod=deberta_score, aux_tensors=[rel, rel, lut])
+            fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+            if len(fresh) != 1:
+                raise RuntimeError("Unexpected DeBERTa compilation count")
+            compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+            symbol = f"fa4_deberta_{dtype_name}"
+            obj = a.output / f"{symbol}.o"
+            compiled.export_to_c(str(obj), symbol)
+            objects.append(str(obj))
+            kernels.append(dict(symbol=symbol, heads=12, kv_heads=12, d=64,
+                                causal=False, window=[None, None], dtype=dtype_name))
     manifest = {
         "abi_version": 4,
+        "deberta_score_sha256": digest(pathlib.Path(__file__).with_name("deberta_score.py")) if a.deberta else None,
         "kernels": kernels,
         "fa4_python_sources": {str(f.relative_to(pathlib.Path(interface.__file__).parent)): digest(f)
                                for f in sorted(pathlib.Path(interface.__file__).parent.rglob("*.py"))},
@@ -91,6 +113,7 @@ subprocess.run([a.cxx, "-std=c++17", "-O2", "-fPIC", "-shared", str(bridge),
                 f"-L{a.runtime_dir}", "-lcute_dsl_runtime",
                 f"-L{a.ffi_root / 'lib'}", "-ltvm_ffi",
                 "-Wl,-rpath,$ORIGIN", "-Wl,-z,defs",
+                *(["-DFA4_DEBERTA"] if any(k["symbol"].startswith("fa4_deberta_") for k in manifest["kernels"]) else []),
                 "-o", str(a.output / "libfa4bridge.so")], check=True)
 for source in [a.runtime_dir / "libcute_dsl_runtime.so",
                a.ffi_root / "lib/libtvm_ffi.so"]:

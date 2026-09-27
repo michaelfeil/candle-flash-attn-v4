@@ -11,3 +11,6 @@ publish = false
 [dependencies]
 candle = { package = "candle-core", git = "https://github.com/michaelfeil/candle", rev = "58c5155d963bebc7129172e25c34a5a73c79b8b9", features = ["cuda"] }
 half = "2.3.1"
+
+[features]
+deberta = []
