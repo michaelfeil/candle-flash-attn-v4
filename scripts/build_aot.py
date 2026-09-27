@@ -1,4 +1,4 @@
-"""Build the experimental Hopper FP16/BF16 bridge; Python is needed only at build time.
+"""Build the experimental FP16/BF16 bridge; Python is needed only at build time.
 
 Use the tested FA4 revision e9cf2c1651d2303191eb40a739a3c135fda00999 and
 nvidia-cutlass-dsl 4.7.1 in an isolated environment. Pass the CuTe runtime
@@ -27,25 +27,33 @@ phase = p.add_mutually_exclusive_group()
 phase.add_argument("--export-only", action="store_true", help="Export on the build GPU before linking in the deployment toolchain")
 phase.add_argument("--link-only", action="store_true", help="Link existing exports; no Python GPU packages required")
 p.add_argument("--deberta", action="store_true", help="Also export packed DeBERTa relative attention")
-p.add_argument("--compile-only", action="store_true", help="Export SM90 using fake tensors without a build GPU; runtime validation is still required")
+p.add_argument("--compile-only", action="store_true", help="Export using fake tensors without a build GPU; runtime validation is still required")
+p.add_argument("--arch", choices=["sm_80", "sm_86", "sm_89", "sm_90a", "sm_120"], default="sm_90a", help="Target architecture; one native bundle per architecture")
 a = p.parse_args()
 if a.compile_only and a.link_only:
     p.error("--compile-only applies to export, not --link-only")
+if a.deberta and a.arch != "sm_90a":
+    p.error("DeBERTa exports currently require --arch sm_90a")
+capability = int(a.arch.removeprefix("sm_").removesuffix("a"))
 a.output.mkdir(parents=True, exist_ok=True)
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 if not a.link_only:
+    # The manifest must describe the generated code, including when the caller
+    # inherited architecture overrides from an earlier build.
+    os.environ["FLASH_ATTENTION_ARCH"] = a.arch
+    os.environ["CUTE_DSL_ARCH"] = a.arch
     if a.compile_only:
-        os.environ["FLASH_ATTENTION_ARCH"] = "sm_90a"
-        os.environ["CUTE_DSL_ARCH"] = "sm_90a"
-        os.environ["FLASH_ATTENTION_NUM_SMS"] = "132"
+        os.environ["FLASH_ATTENTION_NUM_SMS"] = str({80: 108, 86: 72, 89: 58, 90: 132, 120: 188}[capability])
+    else:
+        os.environ.pop("FLASH_ATTENTION_NUM_SMS", None)
     from fa4_source import stage_fa4_sources
     staged_source, softmax_backport = stage_fa4_sources()
     import torch
     import flash_attn.cute.interface as interface
-    if not a.compile_only and torch.cuda.get_device_capability() != (9, 0):
-        raise RuntimeError("This prototype exports SM90 kernels and requires a Hopper build GPU")
+    if not a.compile_only and torch.cuda.get_device_capability() != divmod(capability, 10):
+        raise RuntimeError(f"Exporting {a.arch} requires a matching GPU or --compile-only")
     if importlib.metadata.version("nvidia-cutlass-dsl") != "4.7.1":
         raise RuntimeError("The private export API is validated with cutlass-dsl 4.7.1 only")
     a.output.mkdir(parents=True, exist_ok=True)
@@ -102,7 +110,7 @@ if not a.link_only:
     manifest = {
         "abi_version": 4,
         "softmax_backport": softmax_backport,
-        "architecture": "sm_90a",
+        "architecture": a.arch,
         "executed_during_export": not a.compile_only,
         "deberta_score_sha256": digest(pathlib.Path(__file__).with_name("deberta_score.py")) if a.deberta else None,
         "kernels": kernels,
@@ -127,9 +135,12 @@ if a.export_only:
     raise SystemExit(0)
 if a.runtime_dir is None or a.ffi_root is None:
     p.error("Linking requires --runtime-dir and --ffi-root")
+if manifest["architecture"] not in ["sm_80", "sm_86", "sm_89", "sm_90a", "sm_120"]:
+    raise RuntimeError("Unsupported bundle architecture")
+capability = int(manifest["architecture"].removeprefix("sm_").removesuffix("a"))
 bridge = pathlib.Path(__file__).resolve().parents[1] / "native/bridge.cpp"
 subprocess.run([a.cxx, "-std=c++17", "-O2", "-fPIC", "-shared", str(bridge),
-                *objects, f"-I{a.ffi_root / 'include'}",
+                *objects, f"-DFA4_COMPUTE_CAPABILITY={capability}", f"-I{a.ffi_root / 'include'}",
                 f"-L{a.runtime_dir}", "-lcute_dsl_runtime",
                 f"-L{a.ffi_root / 'lib'}", "-ltvm_ffi",
                 "-Wl,-rpath,$ORIGIN", "-Wl,-z,defs",

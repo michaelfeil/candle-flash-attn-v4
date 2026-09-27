@@ -16,6 +16,10 @@ int __tvm_ffi_fa4_modern_local_bf16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
 int __tvm_ffi_fa4_qwen_bf16(void*,const TVMFFIAny*,int32_t,TVMFFIAny*);
 
 }
+#ifndef FA4_COMPUTE_CAPABILITY
+#define FA4_COMPUTE_CAPABILITY 90
+#endif
+extern "C" int candle_fa4_compute_capability_v1(){return FA4_COMPUTE_CAPABILITY;}
 thread_local std::string last_error;
 extern "C" const char* candle_fa4_error_v4(){return last_error.c_str();}
 struct StreamScope {
