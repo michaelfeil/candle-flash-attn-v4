@@ -62,7 +62,7 @@ if not a.link_only:
             kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
                                 causal=causal, window=window, dtype=dtype_name))
     manifest = {
-        "abi_version": 2,
+        "abi_version": 3,
         "kernels": kernels,
         "fa4_python_sources": {str(f.relative_to(pathlib.Path(interface.__file__).parent)): digest(f)
                                for f in sorted(pathlib.Path(interface.__file__).parent.rglob("*.py"))},
@@ -73,8 +73,8 @@ if not a.link_only:
     (a.output / "manifest.json").write_text(json.dumps(manifest, indent=2))
 else:
     manifest = json.loads((a.output / "manifest.json").read_text())
-    if manifest.get("abi_version") != 2:
-        raise RuntimeError("Re-export the native bundle for ABI version 2")
+    if manifest.get("abi_version") != 3:
+        raise RuntimeError("Re-export the native bundle for ABI version 3")
     objects = [str(a.output / (k["symbol"] + ".o")) for k in manifest["kernels"]]
     for obj in objects:
         path = pathlib.Path(obj)
