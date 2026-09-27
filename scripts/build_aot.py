@@ -63,6 +63,10 @@ if not a.link_only:
             kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
                                 causal=causal, window=window, dtype=dtype_name))
     if a.deberta:
+        # SM90 varlen scheduling derives its grid from runtime tensor sizes and
+        # cumulative lengths. The 129 below is an export example, not a bound
+        # baked into FlashAttentionForwardSm90.__call__. See the long-sequence
+        # Rust regression before changing the pinned upstream implementation.
         from deberta_score import deberta_score
         for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
             q = torch.zeros((256, 12, 64), device="cuda", dtype=dtype)

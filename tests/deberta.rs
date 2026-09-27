@@ -116,3 +116,46 @@ fn relative_bias_rounds_before_adding_nonzero_content() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn runtime_sequences_can_exceed_the_export_example() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let lens = [513usize, 1, 2049];
+    let mut cu = vec![0u32];
+    let mut values = Vec::new();
+    let mut means = Vec::new();
+    for (seq, &n) in lens.iter().enumerate() {
+        cu.push(cu.last().unwrap() + n as u32);
+        let data: Vec<f32> = (0..n)
+            .map(|i| seq as f32 - 1. + (i % 4) as f32 / 4.)
+            .collect();
+        means.push(data.iter().sum::<f32>() / n as f32);
+        for value in data {
+            values.extend([value; 64]);
+        }
+    }
+    let total = *cu.last().unwrap() as usize;
+    for dtype in [DType::F16, DType::BF16] {
+        let qk = Tensor::zeros((total, 1, 64), dtype, &dev)?;
+        let v = Tensor::from_vec(values.clone(), (total, 1, 64), &dev)?.to_dtype(dtype)?;
+        let rel = Tensor::zeros((1, total, 4), dtype, &dev)?;
+        let seq = Seqlens::new(&cu, &dev)?;
+        let buckets = RelativeBuckets::new(2049, 2, false, 512, &dev)?;
+        let output = deberta_attn_varlen(&qk, &qk, &v, &rel, &rel, &seq, &buckets)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        // Uniform per-sequence attention has an analytic result. Check every
+        // token, including tiles well beyond the 129-token export example.
+        for (i, &mean) in means.iter().enumerate() {
+            let tolerance = if dtype == DType::F16 { 0.002 } else { 0.016 };
+            assert!(
+                output[cu[i] as usize * 64..cu[i + 1] as usize * 64]
+                    .iter()
+                    .all(|v| v.is_finite() && (v - mean).abs() < tolerance),
+                "{dtype:?} sequence {i} did not match its own mean {mean}"
+            );
+        }
+    }
+    Ok(())
+}
