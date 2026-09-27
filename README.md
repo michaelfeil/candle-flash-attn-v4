@@ -187,8 +187,10 @@ task-accuracy guarantee across models, shapes, devices, or future upstream versi
 
 The bridge serializes each export's first launch to avoid a CuTe DSL 4.7.1
 library-loader race. Already initialized exports launch concurrently without
-acquiring that mutex. Initialization failure prevents subsequent cold exports
-from entering a potentially poisoned loader. This covers standard and DeBERTa
+acquiring that mutex. Any exception on a first invocation conservatively prevents subsequent cold
+exports from entering a potentially poisoned loader: the opaque exported call
+does not distinguish initialization from launch failure. Recovery requires a
+process restart; already initialized exports can finish. This covers standard and DeBERTa
 exports in the same bundle.
 
 Run the cold-start regression as its own process (with an external timeout),

@@ -35,14 +35,16 @@ template <typename F>
 void invoke_export(unsigned slot, F&& invoke) {
   if (!export_initialized[slot].load(std::memory_order_acquire)) {
     std::unique_lock<std::mutex> lock(export_init_mutex);
-    if (export_init_failure) std::rethrow_exception(export_init_failure);
     if (!export_initialized[slot].load(std::memory_order_relaxed)) {
+      if (export_init_failure) std::rethrow_exception(export_init_failure);
       try {
         invoke();
         export_initialized[slot].store(true, std::memory_order_release);
       } catch (...) {
-        // The runtime's failed-init path may also retain the loader lock.
-        // Fail later cold calls instead of re-entering a poisoned loader.
+        // The exported call combines loading and launch with no reliable
+        // phase/status boundary. Its failed-init path may retain the lock.
+        // Conservatively fail later cold calls; do not risk a process hang.
+        // Already initialized exports may finish. Recovery requires restart.
         export_init_failure = std::current_exception();
         throw;
       }
