@@ -25,6 +25,8 @@ are runtime parameters; the current export families are:
 `Mask::Local64` remains shorthand for a 64/64 window. Windows must fit signed
 int32 and are clamped to the longest sequence before launch to avoid index
 overflow without changing the mask.
+Zero and negative scales are supported by transforming Q before the native call.
+These cases allocate a temporary Q tensor; positive scales use Q directly.
 
 Sequence lengths are dynamic. Contiguous head dimensions and aligned row strides
 are required. CPU execution, backward, arbitrary masks, and FP8
