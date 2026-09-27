@@ -33,7 +33,7 @@ extern "C" int candle_fa4_forward_v4(int mode,int dtype,int device,void* stream,
      tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_modern_local_bf16,nullptr),
      tvm::ffi::Function::FromExternC(nullptr,__tvm_ffi_fa4_qwen_bf16,nullptr)}
   };
-  if(h<=0||hk<=0||!std::isfinite(scale)||(mode!=2&&h!=hk)||(mode==2&&(h%hk||h/hk!=4))
+  if(h<=0||hk<=0||(!std::isfinite(scale)||scale<=0)||(mode!=2&&h!=hk)||(mode==2&&(h%hk||h/hk!=4))
      ||(mode==1&&(left<0||right<0)))throw std::runtime_error("unsupported attention parameters");
   auto& fn=functions[dtype][mode];
   DLDataType data_type{static_cast<uint8_t>(dtype==0?kDLFloat:kDLBfloat),16,1};
