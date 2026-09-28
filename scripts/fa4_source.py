@@ -29,6 +29,13 @@ _TILE_REPLACEMENT = """    elif head_dim <= 128:
         return FwdConfig(128, tile_n, True, True)"""
 
 
+_SM8X_TILE_ORIGINAL = """        elif arch // 10 == 8:
+            cfg = FwdConfig(128, 64, True, True)  # SM80, should tune"""
+_SM8X_TILE_REPLACEMENT = """        elif arch // 10 == 8:
+            # Match FA2's d64 online-softmax block boundaries.
+            cfg = FwdConfig(128, 128 if head_dim == 64 else 64, True, True)"""
+
+
 def stage_fa4_sources():
     if any(name == "flash_attn" or name.startswith("flash_attn.") for name in sys.modules):
         raise RuntimeError("Stage the FA4 backport before importing flash_attn")
@@ -45,7 +52,11 @@ def stage_fa4_sources():
     interface = (original / "cute/interface.py").read_text()
     if interface.count(_TILE_ORIGINAL) != 1:
         raise RuntimeError("FA4 SM90 tile selection changed: review the causal d128 backport")
-    patched_interface = interface.replace(_TILE_ORIGINAL, _TILE_REPLACEMENT)
+    if interface.count(_SM8X_TILE_ORIGINAL) != 1:
+        raise RuntimeError("FA4 SM8x tile selection changed: review the d64 backport")
+    patched_interface = interface.replace(_TILE_ORIGINAL, _TILE_REPLACEMENT).replace(
+        _SM8X_TILE_ORIGINAL, _SM8X_TILE_REPLACEMENT
+    )
     stage = tempfile.TemporaryDirectory(prefix="fa4-softmax-")
     target = pathlib.Path(stage.name) / "flash_attn"
     shutil.copytree(original, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -57,6 +68,7 @@ def stage_fa4_sources():
         "original_softmax_sha256": hashlib.sha256(text.encode()).hexdigest(),
         "patched_softmax_sha256": hashlib.sha256(patched.encode()).hexdigest(),
         "sm90_causal_d128_tile_n": 64,
+        "sm8x_d64_tile_n": 128,
         "original_interface_sha256": hashlib.sha256(interface.encode()).hexdigest(),
         "patched_interface_sha256": hashlib.sha256(patched_interface.encode()).hexdigest(),
     }
