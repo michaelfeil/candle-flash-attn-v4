@@ -41,9 +41,10 @@ can choose a fallback before invoking FA4. Datacenter Blackwell SM100/110 has
 a different scheduler/ABI and is not packaged yet. SM75 is not a target of this
 upstream FA4 implementation. On A10G (SM86), L4 (SM89), and RTX Pro 6000 (SM120), all 24 native
 kernel reference cases per GPU passed: three attention layouts, both dtypes,
-and packed lengths through 2048 tokens. Full-model qualification is in progress;
-these kernel checks are not a model-accuracy guarantee. SM80 has compile-only
-coverage. Compilation alone is not a correctness result.
+and packed lengths through 2048 tokens. Per-GPU model qualification using the
+native MF-TEI serving images is recorded in
+[the integration PR](https://github.com/michaelfeil/text-embeddings-inference/pull/30).
+Kernel checks and compilation alone are not model-accuracy guarantees.
 
 ## Build
 
@@ -140,7 +141,7 @@ collection of model presets. The current crate is not feature-complete.
 | Head geometry | Runtime head counts for the families above; configurable dimensions, value dimensions, and all upstream GQA ratios pending |
 | Layouts | Packed self/cross-attention implemented; native dense paths pending |
 | Masks | Global, causal, finite two-sided windows for the families above; remaining combinations and one-sided windows pending |
-| GPU architectures | Architecture-aware SM80/86/89/90/120 exports; SM90 qualified; SM86/89/120 native reference tests passed, model qualification in progress; SM80 compile-only; SM100/110 ABI pending |
+| GPU architectures | Architecture-aware SM80/86/89/90/120 exports; H100 qualification and SM86/89/120 native reference tests passed; per-GPU model results linked above; SM100/110 ABI pending |
 | Decode and scheduling | Paged KV, split-KV, scheduler metadata and associated workspace lifecycle pending |
 | Advanced forward | LSE, softcap, sinks, auxiliary tensors, custom score/mask functions and block sparsity need export/API coverage |
 | Training | Backward exports and Candle autograd integration pending; forward-only is not training support |
