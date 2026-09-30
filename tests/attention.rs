@@ -18,6 +18,8 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
                 (12, 12, 64, Mask::Global),
                 (12, 12, 64, Mask::Local64),
                 (32, 8, 128, Mask::Causal),
+                (16, 8, 128, Mask::Global),
+                (6, 3, 128, Mask::Global),
             ] {
                 // Multiples of 1/32 are exactly representable in both input dtypes.
                 let qv: Vec<f32> = (0..202 * h * d)
@@ -128,6 +130,8 @@ fn packed_masks_match_uniform_attention() -> Result<()> {
             (12, 12, 64, Mask::Global),
             (12, 12, 64, Mask::Local64),
             (32, 8, 128, Mask::Causal),
+            (16, 8, 128, Mask::Global),
+            (6, 3, 128, Mask::Global),
         ] {
             let total = 202;
             let q = Tensor::zeros((total, h, d), dtype, &dev)?;

@@ -11,7 +11,7 @@ coverage. No crates.io release or universal performance/accuracy claim yet.
 
 ## Current native bundle
 
-Hopper SM90, FP16/BF16, packed self- and cross-attention. Head counts and softmax scale
+Per-architecture bundles for SM80, SM86, SM89, SM90, and SM120, FP16/BF16, packed self- and cross-attention. Head counts and softmax scale
 are runtime parameters; the current export families are:
 
 | Q/KV relationship | Head dimension | Mask |
@@ -19,6 +19,7 @@ are runtime parameters; the current export families are:
 | Any positive equal head counts (MHA) | 64 | global |
 | Any positive equal head counts (MHA) | 64 | inclusive asymmetric sliding window |
 | Q heads = 4 x KV heads (including 4/1 MQA) | 128 | causal |
+| Q heads = 2 x KV heads | 128 | global (Voyage-4-nano) |
 
 `AttentionConfig` accepts a finite custom softmax scale; the default is
 `1/sqrt(head_dim)`. `Mask::Window { left, right }` selects inclusive distances.
@@ -34,10 +35,16 @@ are not exposed by this initial bundle. Unsupported inputs return an
 error. The wrapper never silently switches to another attention implementation.
 
 Upstream has architecture paths for SM8x, SM90, SM10x/11x, and SM12x. That does
-**not** mean this initial SM90 bundle runs on all of them. Ampere/Ada and RTX
-Blackwell exports, plus datacenter Blackwell's different scheduler/ABI, are the
-next packaging work. Non-H100 hardware has not been tested here. SM75 is not a
-target of this upstream FA4 implementation.
+**not** mean one bundle runs on all of them. Select `--arch` when exporting;
+the Rust wrapper rejects a device whose compute capability differs from the
+linked bundle. `compiled_compute_capability()` exposes the target so callers
+can choose a fallback before invoking FA4. Datacenter Blackwell SM100/110 has
+a different scheduler/ABI and is not packaged yet. SM75 is not a target of this
+upstream FA4 implementation. On A10G (SM86), L4 (SM89), and RTX Pro 6000 (SM120), all 24 native
+kernel reference cases per GPU passed: three attention layouts, both dtypes,
+and packed lengths through 2048 tokens. Full-model qualification is in progress;
+these kernel checks are not a model-accuracy guarantee. SM80 has compile-only
+coverage. Compilation alone is not a correctness result.
 
 ## Build
 
@@ -55,9 +62,12 @@ export LD_LIBRARY_PATH="$FA4_NATIVE_LIB_DIR:${LD_LIBRARY_PATH:-}"
 cargo test --test attention
 ```
 
-`--compile-only` uses fake tensors to export SM90 kernels without a build GPU.
+`--compile-only` uses fake tensors to export kernels without a build GPU.
+Choose `--arch sm_80`, `sm_86`, `sm_89`, `sm_90a` (default), or `sm_120`.
 It does not establish runtime correctness; the manifest records whether export
-executed kernels. Omit it to export and execute on a Hopper GPU.
+executed kernels. Omit it to export and execute on a matching GPU.
+`--link-only` reads the architecture from the exported manifest. DeBERTa
+exports remain restricted to SM90.
 
 Choose the CuTe runtime compatible with the deployment CUDA version. The export
 and link phases can run separately so the C++ compiler matches the deployment
@@ -131,7 +141,7 @@ collection of model presets. The current crate is not feature-complete.
 | Head geometry | Runtime head counts for the families above; configurable dimensions, value dimensions, and all upstream GQA ratios pending |
 | Layouts | Packed self/cross-attention implemented; native dense paths pending |
 | Masks | Global, causal, finite two-sided windows for the families above; remaining combinations and one-sided windows pending |
-| GPU architectures | SM90 runtime tested; SM80/SM120 compile probes only; full architecture-aware exports and dispatch pending |
+| GPU architectures | Architecture-aware SM80/86/89/90/120 exports; SM90 qualified; SM86/89/120 native reference tests passed, model qualification in progress; SM80 compile-only; SM100/110 ABI pending |
 | Decode and scheduling | Paged KV, split-KV, scheduler metadata and associated workspace lifecycle pending |
 | Advanced forward | LSE, softcap, sinks, auxiliary tensors, custom score/mask functions and block sparsity need export/API coverage |
 | Training | Backward exports and Candle autograd integration pending; forward-only is not training support |

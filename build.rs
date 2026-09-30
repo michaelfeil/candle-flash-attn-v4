@@ -9,6 +9,13 @@ fn main() {
         assert!(dir.join(name).is_file(), "missing {name} in native bundle");
         println!("cargo:rerun-if-changed={}", dir.join(name).display());
     }
+    let manifest = dir.join("manifest.json");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let contents = std::fs::read_to_string(&manifest).expect("FA4 requires an AOT manifest");
+    assert!(
+        contents.contains("fa4_voyage_fp16") && contents.contains("fa4_voyage_bf16"),
+        "rebuild the FA4 bundle: missing global d128 GQA2 exports"
+    );
     if std::env::var_os("CARGO_FEATURE_DEBERTA").is_some() {
         let manifest = dir.join("manifest.json");
         println!("cargo:rerun-if-changed={}", manifest.display());
