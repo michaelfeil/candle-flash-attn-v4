@@ -164,10 +164,13 @@ Wrapper code: MIT OR Apache-2.0. Upstream FlashAttention: BSD-3-Clause (see
 
 Build the native bundle with `scripts/build_aot.py --deberta` and enable the
 Rust `deberta` feature. `deberta_attn_varlen` accepts packed FP16/BF16 d64
-self-attention on SM90, validated `Seqlens`, a `RelativeBuckets` lookup, and
+self-attention on SM90 or SM120, validated `Seqlens`, a `RelativeBuckets` lookup, and
 precomputed content-to-position / position-to-content tables. It uses the same
 FA4 tiled online-softmax kernel with a score hook; it never allocates an
 attention matrix or pads a sequence to the batch maximum.
+
+SM120 exports are verified by offline compilation and native linking; runtime
+correctness is validated on SM90. SM8x does not support the upstream custom score hook.
 
 Q/K/V use `[total_tokens, heads, 64]`; the two relative tables use
 `[heads, total_tokens, 2 * relative_span]`. Scale K and the relative tables as
