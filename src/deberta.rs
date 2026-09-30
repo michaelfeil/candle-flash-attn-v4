@@ -193,8 +193,13 @@ impl Deberta {
             .context()
             .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
             .map_err(candle::Error::wrap)?;
-        if (major, minor) != (9, 0) {
-            candle::bail!("DeBERTa AOT bundle currently requires SM90")
+        if major * 10 + minor != crate::compiled_compute_capability() {
+            candle::bail!(
+                "DeBERTa FA4 bundle targets SM{}, device is SM{}{}",
+                crate::compiled_compute_capability(),
+                major,
+                minor
+            )
         }
         let shape = ql.shape().clone();
         let q = q.as_cuda_slice::<T>()?.slice(ql.start_offset()..);

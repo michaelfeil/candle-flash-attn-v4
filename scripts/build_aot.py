@@ -32,8 +32,8 @@ p.add_argument("--arch", choices=["sm_80", "sm_86", "sm_89", "sm_90a", "sm_120"]
 a = p.parse_args()
 if a.compile_only and a.link_only:
     p.error("--compile-only applies to export, not --link-only")
-if a.deberta and a.arch != "sm_90a":
-    p.error("DeBERTa exports currently require --arch sm_90a")
+if a.deberta and a.arch not in ("sm_90a", "sm_120"):
+    p.error("DeBERTa exports require --arch sm_90a or sm_120; upstream SM8x does not support custom score_mod")
 capability = int(a.arch.removeprefix("sm_").removesuffix("a"))
 a.output.mkdir(parents=True, exist_ok=True)
 def digest(path):
