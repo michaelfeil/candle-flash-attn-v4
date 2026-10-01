@@ -224,3 +224,17 @@ including `--features deberta` when those exports are present:
 ```sh
 timeout 60s cargo test --release --features deberta --test concurrent_init
 ```
+
+### Experimental paged Qwen attention
+
+Enable the Rust `paged` feature and export the native bundle with `--paged-qwen`
+(`--arch sm_90a`). `flash_attn_paged` supports causal FP16/BF16 attention with
+head dimension 128, Q/KV head ratios 2 or 4, and 64-token KV pages on Hopper.
+`PagedKv::new` validates page indices and per-sequence KV lengths on the host;
+reuse its uploaded metadata across layers when the page tables are identical.
+K/V storage has shape `[pages, 64, kv_heads, 128]`. Queries are packed and use
+independent `Seqlens`. Cache admission, ownership, and eviction belong to the
+caller; keep page contents valid until the attention launch has consumed them.
+
+`cargo test --features paged --test paged` compares paged and packed attention
+using runtime batch, head, page, and sequence sizes different from the exports.

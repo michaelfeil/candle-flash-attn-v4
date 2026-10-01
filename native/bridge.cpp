@@ -36,7 +36,7 @@ struct StreamScope {
 // only the first successful call to each export; warm calls stay concurrent.
 namespace {
 std::mutex export_init_mutex;
-std::atomic<bool> export_initialized[12]{};
+std::atomic<bool> export_initialized[16]{};
 std::exception_ptr export_init_failure;
 
 template <typename F>
@@ -133,4 +133,8 @@ extern "C" int candle_fa4_deberta_v1(int dtype,int device,void* stream,
   last_error.clear();return 0;
  } catch(const std::exception& e){last_error=e.what();return -1;}
 }
+#endif
+
+#ifdef FA4_PAGED
+#include "paged.cpp"
 #endif

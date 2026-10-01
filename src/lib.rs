@@ -423,3 +423,8 @@ impl Fa4 {
 mod deberta;
 #[cfg(feature = "deberta")]
 pub use deberta::{deberta_attn_varlen, RelativeBuckets};
+
+#[cfg(feature = "paged")]
+mod paged;
+#[cfg(feature = "paged")]
+pub use paged::{flash_attn_paged, PagedKv, PAGE_SIZE};
