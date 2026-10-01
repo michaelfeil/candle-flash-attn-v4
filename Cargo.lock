@@ -108,7 +108,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/michaelfeil/candle?rev=3e14305b7555aac920635cecfd131e023739de34#3e14305b7555aac920635cecfd131e023739de34"
+source = "git+https://github.com/michaelfeil/candle?rev=540ff06f0ca26fb75ee04175971f0b309502a1b6#540ff06f0ca26fb75ee04175971f0b309502a1b6"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/michaelfeil/candle?rev=3e14305b7555aac920635cecfd131e023739de34#3e14305b7555aac920635cecfd131e023739de34"
+source = "git+https://github.com/michaelfeil/candle?rev=540ff06f0ca26fb75ee04175971f0b309502a1b6#540ff06f0ca26fb75ee04175971f0b309502a1b6"
 dependencies = [
  "cudaforge",
 ]
