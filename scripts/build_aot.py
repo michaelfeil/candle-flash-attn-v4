@@ -66,6 +66,7 @@ if not a.link_only:
                 ("bert", 16, 16, 64, False, (None, None)),
                 ("modern_local", 12, 12, 64, False, (64, 64)),
                 ("qwen", 32, 8, 128, True, (None, None)),
+                ("qwen_gqa2", 16, 8, 128, True, (None, None)),
                 ("voyage", 16, 8, 128, False, (None, None)),
             ]:
                 q = torch.zeros((256, h, d), device="cuda", dtype=dtype)
