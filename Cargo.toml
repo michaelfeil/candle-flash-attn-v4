@@ -9,7 +9,7 @@ repository = "https://github.com/michaelfeil/candle-flash-attn-v4"
 publish = false
 
 [dependencies]
-candle = { package = "candle-core", git = "https://github.com/michaelfeil/candle", rev = "7718ae515996730c756633975d21f5859d11dce7", features = ["cuda"] }
+candle = { package = "candle-core", git = "https://github.com/michaelfeil/candle", rev = "c182c7bf11227bb80feb8deedd9c6e9834d1b6d0", features = ["cuda"] }
 half = "2.3.1"
 
 [features]
