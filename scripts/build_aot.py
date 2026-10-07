@@ -26,6 +26,7 @@ p.add_argument("--cxx", default="g++")
 phase = p.add_mutually_exclusive_group()
 phase.add_argument("--export-only", action="store_true", help="Export on the build GPU before linking in the deployment toolchain")
 phase.add_argument("--link-only", action="store_true", help="Link existing exports; no Python GPU packages required")
+p.add_argument("--paged-qwen", action="store_true", help="Export Hopper causal Qwen attention with 64-token KV pages")
 p.add_argument("--deberta", action="store_true", help="Also export packed DeBERTa relative attention")
 p.add_argument("--compile-only", action="store_true", help="Export using fake tensors without a build GPU; runtime validation is still required")
 p.add_argument("--arch", choices=["sm_80", "sm_86", "sm_89", "sm_90a", "sm_120"], default="sm_90a", help="Target architecture; one native bundle per architecture")
@@ -34,6 +35,8 @@ if a.compile_only and a.link_only:
     p.error("--compile-only applies to export, not --link-only")
 if a.deberta and a.arch not in ("sm_90a", "sm_120"):
     p.error("DeBERTa exports require --arch sm_90a or sm_120; upstream SM8x does not support custom score_mod")
+if a.paged_qwen and a.arch != "sm_90a":
+    p.error("Paged Qwen exports currently require --arch sm_90a")
 capability = int(a.arch.removeprefix("sm_").removesuffix("a"))
 a.output.mkdir(parents=True, exist_ok=True)
 def digest(path):
@@ -66,6 +69,7 @@ if not a.link_only:
                 ("bert", 16, 16, 64, False, (None, None)),
                 ("modern_local", 12, 12, 64, False, (64, 64)),
                 ("qwen", 32, 8, 128, True, (None, None)),
+                ("qwen_gqa2", 16, 8, 128, True, (None, None)),
                 ("voyage", 16, 8, 128, False, (None, None)),
             ]:
                 q = torch.zeros((256, h, d), device="cuda", dtype=dtype)
@@ -84,6 +88,29 @@ if not a.link_only:
                 objects.append(str(obj))
                 kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
                                     causal=causal, window=window, dtype=dtype_name))
+        if a.paged_qwen:
+            cuq = torch.tensor([0, 1, 66], device="cuda", dtype=torch.int32)
+            used = torch.tensor([127, 193], device="cuda", dtype=torch.int32)
+            table = torch.tensor([[7, 2, 0, 0], [4, 9, 3, 0]], device="cuda", dtype=torch.int32)
+            for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16)]:
+                for ratio in [2, 4]:
+                    q = torch.zeros((66, 8 * ratio, 128), device="cuda", dtype=dtype)
+                    k = torch.zeros((10, 64, 8, 128), device="cuda", dtype=dtype)
+                    previous = set(interface._flash_attn_fwd.compile_cache.cache)
+                    interface.flash_attn_varlen_func(
+                        q, k, k, cu_seqlens_q=cuq, seqused_k=used, page_table=table,
+                        max_seqlen_q=65, max_seqlen_k=193, causal=True)
+                    fresh = set(interface._flash_attn_fwd.compile_cache.cache) - previous
+                    if len(fresh) != 1:
+                        raise RuntimeError("Unexpected paged Qwen compilation count")
+                    compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
+                    symbol = f"fa4_qwen_paged_gqa{ratio}_{dtype_name}"
+                    obj = a.output / f"{symbol}.o"
+                    compiled.export_to_c(str(obj), symbol)
+                    objects.append(str(obj))
+                    kernels.append(dict(symbol=symbol, heads=8 * ratio, kv_heads=8, d=128,
+                                        causal=True, window=[None, None], dtype=dtype_name,
+                                        page_size=64))
         if a.deberta:
             # SM90 varlen scheduling derives its grid from runtime tensor sizes and
             # cumulative lengths. The 129 below is an export example, not a bound
@@ -146,12 +173,14 @@ subprocess.run([a.cxx, "-std=c++17", "-O2", "-fPIC", "-shared", str(bridge),
                 f"-L{a.ffi_root / 'lib'}", "-ltvm_ffi",
                 "-Wl,-rpath,$ORIGIN", "-Wl,-z,defs",
                 *(["-DFA4_DEBERTA"] if any(k["symbol"].startswith("fa4_deberta_") for k in manifest["kernels"]) else []),
+                *(["-DFA4_PAGED"] if any(k["symbol"].startswith("fa4_qwen_paged_") for k in manifest["kernels"]) else []),
                 "-o", str(a.output / "libfa4bridge.so")], check=True)
 for source in [a.runtime_dir / "libcute_dsl_runtime.so",
                a.ffi_root / "lib/libtvm_ffi.so"]:
     shutil.copy2(source, a.output / source.name)
 manifest.update({
     "bridge_source_sha256": digest(bridge),
+    "paged_source_sha256": digest(bridge.with_name("paged.cpp")) if any(k["symbol"].startswith("fa4_qwen_paged_") for k in manifest["kernels"]) else None,
     "cxx": subprocess.check_output([a.cxx, "--version"], text=True).splitlines()[0],
     "libraries": {f.name: digest(f) for f in sorted(a.output.glob("*.so"))},
 })

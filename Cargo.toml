@@ -14,3 +14,4 @@ half = "2.3.1"
 
 [features]
 deberta = []
+paged = []

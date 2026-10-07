@@ -236,6 +236,7 @@ fn try_forward(
         (64, false, Some(_), Some(_)) if h == hk => 1,
         (128, true, None, None) if h % hk == 0 && h / hk == 4 => 2,
         (128, false, None, None) if h % hk == 0 && h / hk == 2 => 3,
+        (128, true, None, None) if h % hk == 0 && h / hk == 2 => 4,
         _ => return Ok(None),
     };
     for t in [q, k, v] {
@@ -422,3 +423,8 @@ impl Fa4 {
 mod deberta;
 #[cfg(feature = "deberta")]
 pub use deberta::{deberta_attn_varlen, RelativeBuckets};
+
+#[cfg(feature = "paged")]
+mod paged;
+#[cfg(feature = "paged")]
+pub use paged::{flash_attn_paged, PagedKv, PAGE_SIZE};
