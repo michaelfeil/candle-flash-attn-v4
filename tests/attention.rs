@@ -18,6 +18,8 @@ fn nonuniform_attention_matches_cpu_reference() -> Result<()> {
                 (12, 12, 64, Mask::Global),
                 (12, 12, 64, Mask::Local64),
                 (32, 8, 128, Mask::Causal),
+                (16, 8, 128, Mask::Causal),
+                (6, 3, 128, Mask::Causal),
                 (16, 8, 128, Mask::Global),
                 (6, 3, 128, Mask::Global),
             ] {
@@ -130,6 +132,8 @@ fn packed_masks_match_uniform_attention() -> Result<()> {
             (12, 12, 64, Mask::Global),
             (12, 12, 64, Mask::Local64),
             (32, 8, 128, Mask::Causal),
+            (16, 8, 128, Mask::Causal),
+            (6, 3, 128, Mask::Causal),
             (16, 8, 128, Mask::Global),
             (6, 3, 128, Mask::Global),
         ] {
