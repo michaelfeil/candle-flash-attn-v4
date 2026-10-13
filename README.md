@@ -20,6 +20,7 @@ are runtime parameters; the current export families are:
 | Any positive equal head counts (MHA) | 64 | inclusive asymmetric sliding window |
 | Q heads = 4 x KV heads (including 4/1 MQA) | 128 | causal |
 | Q heads = 2 x KV heads | 128 | global (Voyage-4-nano) |
+| Q heads = 2 x KV heads | 128 | causal (Qwen3-Embedding-0.6B) |
 
 `AttentionConfig` accepts a finite custom softmax scale; the default is
 `1/sqrt(head_dim)`. `Mask::Window { left, right }` selects inclusive distances.
