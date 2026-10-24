@@ -12,3 +12,4 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
       - run: python3 -m py_compile scripts/*.py
+      - run: python3 -m unittest discover -s scripts -p test_portable_host.py
