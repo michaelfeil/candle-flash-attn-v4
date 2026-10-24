@@ -63,6 +63,10 @@ export LD_LIBRARY_PATH="$FA4_NATIVE_LIB_DIR:${LD_LIBRARY_PATH:-}"
 cargo test --test attention
 ```
 
+Host wrappers target baseline x86-64 or generic AArch64 independently of the GPU.
+Re-export old bundles: linking and Cargo builds reject missing host provenance.
+The build audits x86 objects and the bridge for AVX-family instructions.
+
 `--compile-only` uses fake tensors to export kernels without a build GPU.
 Choose `--arch sm_80`, `sm_86`, `sm_89`, `sm_90a` (default), or `sm_120`.
 It does not establish runtime correctness; the manifest records whether export

@@ -13,6 +13,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.display());
     let contents = std::fs::read_to_string(&manifest).expect("FA4 requires an AOT manifest");
     assert!(
+        contents.contains("\"host_target\""),
+        "re-export the FA4 bundle with portable host code"
+    );
+    assert!(
         contents.contains("fa4_voyage_fp16")
             && contents.contains("fa4_voyage_bf16")
             && contents.contains("fa4_qwen_gqa2_fp16")

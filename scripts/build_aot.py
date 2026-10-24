@@ -16,6 +16,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+from portable_host import export_portable, host_target, validate_host_object
 
 
 p = argparse.ArgumentParser(description=__doc__)
@@ -84,7 +85,7 @@ if not a.link_only:
                 compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
                 symbol = f"fa4_{name}_{dtype_name}"
                 obj = a.output / f"{symbol}.o"
-                compiled.export_to_c(str(obj), symbol)
+                export_portable(compiled, obj, symbol)
                 objects.append(str(obj))
                 kernels.append(dict(symbol=symbol, heads=h, kv_heads=hk, d=d,
                                     causal=causal, window=window, dtype=dtype_name))
@@ -106,7 +107,7 @@ if not a.link_only:
                     compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
                     symbol = f"fa4_qwen_paged_gqa{ratio}_{dtype_name}"
                     obj = a.output / f"{symbol}.o"
-                    compiled.export_to_c(str(obj), symbol)
+                    export_portable(compiled, obj, symbol)
                     objects.append(str(obj))
                     kernels.append(dict(symbol=symbol, heads=8 * ratio, kv_heads=8, d=128,
                                         causal=True, window=[None, None], dtype=dtype_name,
@@ -131,12 +132,13 @@ if not a.link_only:
                 compiled = interface._flash_attn_fwd.compile_cache.cache[fresh.pop()]
                 symbol = f"fa4_deberta_{dtype_name}"
                 obj = a.output / f"{symbol}.o"
-                compiled.export_to_c(str(obj), symbol)
+                export_portable(compiled, obj, symbol)
                 objects.append(str(obj))
                 kernels.append(dict(symbol=symbol, heads=12, kv_heads=12, d=64,
                                     causal=False, window=[None, None], dtype=dtype_name))
     manifest = {
         "abi_version": 4,
+        "host_target": host_target(),
         "softmax_backport": softmax_backport,
         "architecture": a.arch,
         "executed_during_export": not a.compile_only,
@@ -153,11 +155,15 @@ else:
     manifest = json.loads((a.output / "manifest.json").read_text())
     if manifest.get("abi_version") != 4:
         raise RuntimeError("Re-export the native bundle for ABI version 4")
+    if manifest.get("host_target") != host_target():
+        raise RuntimeError("Re-export FA4 with the portable host target before linking")
     objects = [str(a.output / (k["symbol"] + ".o")) for k in manifest["kernels"]]
     for obj in objects:
         path = pathlib.Path(obj)
         if digest(path) != manifest["objects"][path.name]:
             raise RuntimeError(f"Export changed since manifest was created: {path}")
+for obj in objects:
+    validate_host_object(pathlib.Path(obj))
 if a.export_only:
     print(f"Exported kernels to {a.output}; link with a deployment-compatible C++ compiler", flush=True)
     raise SystemExit(0)
@@ -175,6 +181,7 @@ subprocess.run([a.cxx, "-std=c++17", "-O2", "-fPIC", "-shared", str(bridge),
                 *(["-DFA4_DEBERTA"] if any(k["symbol"].startswith("fa4_deberta_") for k in manifest["kernels"]) else []),
                 *(["-DFA4_PAGED"] if any(k["symbol"].startswith("fa4_qwen_paged_") for k in manifest["kernels"]) else []),
                 "-o", str(a.output / "libfa4bridge.so")], check=True)
+validate_host_object(a.output / "libfa4bridge.so")
 for source in [a.runtime_dir / "libcute_dsl_runtime.so",
                a.ffi_root / "lib/libtvm_ffi.so"]:
     shutil.copy2(source, a.output / source.name)
